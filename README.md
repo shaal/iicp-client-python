@@ -1,8 +1,15 @@
-# iicp-client — Python SDK
+# iicp-client · Python SDK
 
-Official Python client library for the [IICP protocol](https://iicp.network) (Intent-based Inter-agent Communication Protocol).
+[![CI](https://github.com/RobLe3/iicp-client-python/actions/workflows/ci.yml/badge.svg)](https://github.com/RobLe3/iicp-client-python/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![Protocol](https://img.shields.io/badge/IICP-v1.5-indigo.svg)](https://iicp.network/spec)
+[![PyPI](https://img.shields.io/badge/PyPI-iicp--client-blue?logo=pypi&logoColor=white)](https://pypi.org/project/iicp-client/)
 
-Implements **ADR-016 §1** — SDK conformance rules SDK-01 through SDK-06.
+Official Python client library for the [IICP protocol](https://iicp.network) — route AI agent tasks by intent across a self-organising mesh of provider nodes. No central broker. No hardcoded endpoints.
+
+```
+urn:iicp:intent:llm:chat:v1  →  discover  →  select  →  submit
+```
 
 ---
 
@@ -12,7 +19,7 @@ Implements **ADR-016 §1** — SDK conformance rules SDK-01 through SDK-06.
 pip install iicp-client
 ```
 
-Requires Python ≥ 3.11 and [httpx](https://www.python-httpx.org/).
+Requires **Python ≥ 3.11** and [`httpx`](https://www.python-httpx.org/).
 
 ---
 
@@ -20,24 +27,18 @@ Requires Python ≥ 3.11 and [httpx](https://www.python-httpx.org/).
 
 ```python
 import asyncio
-from iicp_client import IicpClient, ClientConfig, TaskRequest
+from iicp_client import IicpClient, ClientConfig
 
 async def main():
-    client = IicpClient(ClientConfig(
-        directory_url="https://iicp.network/api",
-        timeout_ms=30_000,
-    ))
+    client = IicpClient(ClientConfig(directory_url="https://iicp.network/api"))
 
-    # Discover nodes capable of LLM chat
     nodes = await client.discover_async("urn:iicp:intent:llm:chat:v1")
     if not nodes.nodes:
         print("No nodes available")
         return
 
-    # Submit a chat task to the best node
-    node = nodes.nodes[0]
     response = await client.chat_async(
-        node=node,
+        node=nodes.nodes[0],
         messages=[{"role": "user", "content": "Hello from IICP!"}],
     )
     print(response.choices[0].message["content"])
@@ -45,15 +46,15 @@ async def main():
 asyncio.run(main())
 ```
 
-### Synchronous API
+A synchronous wrapper is available for scripts and notebooks:
 
 ```python
 from iicp_client import IicpClient
 
-client = IicpClient()
-nodes  = client.discover("urn:iicp:intent:llm:chat:v1")
-resp   = client.chat(node=nodes.nodes[0], messages=[{"role": "user", "content": "Hi"}])
-print(resp.choices[0].message["content"])
+client   = IicpClient()
+nodes    = client.discover("urn:iicp:intent:llm:chat:v1")
+response = client.chat(node=nodes.nodes[0], messages=[{"role": "user", "content": "Hi"}])
+print(response.choices[0].message["content"])
 ```
 
 ---
@@ -64,17 +65,17 @@ print(resp.choices[0].message["content"])
 from iicp_client import ClientConfig
 
 config = ClientConfig(
-    directory_url="https://iicp.network/api",  # directory endpoint
-    timeout_ms=30_000,                          # max 120_000 (SDK-04)
-    region="eu-central",                        # prefer nodes in this region
-    node_token="your-token",                    # optional auth token
+    directory_url = "https://iicp.network/api",  # IICP directory
+    timeout_ms    = 30_000,                       # max 120 000 (SDK-04)
+    region        = "eu-central",                 # prefer nodes in region
+    node_token    = "your-token",                 # optional auth token
 )
 ```
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `directory_url` | `https://iicp.network/api` | IICP directory endpoint |
-| `timeout_ms` | `30000` | Request timeout (max 120 000 ms) |
+| `directory_url` | `"https://iicp.network/api"` | IICP directory endpoint |
+| `timeout_ms` | `30000` | Request timeout — max 120 000 ms |
 | `region` | `None` | Preferred node region |
 | `node_token` | `None` | Bearer token for authenticated nodes |
 
@@ -88,10 +89,10 @@ from iicp_client import DiscoverOptions
 nodes = await client.discover_async(
     "urn:iicp:intent:llm:chat:v1",
     DiscoverOptions(
-        region="eu-central",
-        model="phi3:mini",        # request a specific model
-        min_reputation=0.7,       # only well-regarded nodes
-        limit=5,
+        region         = "eu-central",
+        model          = "phi3:mini",
+        min_reputation = 0.7,
+        limit          = 5,
     )
 )
 ```
@@ -101,57 +102,51 @@ nodes = await client.discover_async(
 ## Error handling
 
 ```python
-from iicp_client import IicpClient, IicpError
+from iicp_client import IicpError
 
 try:
-    resp = await client.submit_async(request)
+    response = await client.submit_async(node, request)
 except IicpError as e:
-    print(f"Error [{e.code}]: {e.message}  (HTTP {e.status_code})")
+    print(f"[{e.code}] {e.message}  (HTTP {e.status_code})")
 ```
 
-Errors are typed with a `code` field matching the IICP error reference (e.g. `task_timeout`, `no_nodes_available`). See the [error reference](https://iicp.network/docs/error-reference).
+Error codes match the [IICP error reference](https://iicp.network/docs/error-reference) — e.g. `task_timeout`, `capacity_exceeded`, `no_nodes_available`.
 
 ---
 
-## Conformance
+## SDK conformance
 
-This SDK targets the **IICP SDK conformance tier** (`iicp:sdk:v1`, spec S.14).
-See [Conformance badges](https://iicp.network/conformance) for how to obtain a signed badge for your implementation.
+| Rule | Description | Status |
+|------|-------------|--------|
+| SDK-01 | discover → select → submit pipeline with node retry | ✓ |
+| SDK-02 | `task_id` auto-generated (UUID v4) | ✓ |
+| SDK-03 | Intent URN pattern validation | ✓ |
+| SDK-04 | `timeout_ms` capped at 120 000 ms | ✓ |
+| SDK-05 | Retry on 429 / 503 with exponential back-off | ✓ |
+| SDK-06 | W3C `traceparent` propagation | ✓ |
 
-| ADR | Rule | Status |
-|-----|------|--------|
-| ADR-016 | SDK-01 discover → select → submit pipeline | ✓ |
-| ADR-016 | SDK-02 task_id auto-generated (UUID v4) | ✓ |
-| ADR-016 | SDK-03 intent validation (URN pattern) | ✓ |
-| ADR-016 | SDK-04 timeout_ms ≤ 120 000 enforced | ✓ |
-| ADR-016 | SDK-05 retry on 429/503 with back-off | ✓ |
-| ADR-016 | SDK-06 W3C traceparent propagation | ✓ |
+Conformance tier: `iicp:sdk:v1` (spec S.14) · [Request a badge](https://iicp.network/conformance)
 
 ---
 
 ## Development
 
 ```bash
-# Install in editable mode with dev deps
-pip install -e ".[dev]"
-
-# Run tests
-pytest tests/ -v
-
-# Lint
-ruff check src tests
+pip install -e ".[dev]"   # install with dev deps
+pytest tests/ -v          # run 10 unit tests
+ruff check src tests       # lint
 ```
 
 ---
 
 ## Links
 
-- Protocol spec: [iicp.network/spec](https://iicp.network/spec)
-- Node setup: [iicp.network/docs/node-setup](https://iicp.network/docs/node-setup)
-- Error reference: [iicp.network/docs/error-reference](https://iicp.network/docs/error-reference)
-- Conformance: [iicp.network/conformance](https://iicp.network/conformance)
-- GitHub issues: [github.com/RobLe3/iicp-client-python](https://github.com/RobLe3/iicp-client-python/issues)
+- [Protocol spec](https://iicp.network/spec) — full IICP specification
+- [Node setup guide](https://iicp.network/docs/node-setup) — run your own node
+- [Error reference](https://iicp.network/docs/error-reference) — all error codes
+- [iicp-client-typescript](https://github.com/RobLe3/iicp-client-typescript) — TypeScript SDK
+- [iicp-client-rust](https://github.com/RobLe3/iicp-client-rust) — Rust SDK
 
 ---
 
-**License**: Apache 2.0 · © IICP Working Group
+Apache 2.0 · [iicp.network](https://iicp.network)
