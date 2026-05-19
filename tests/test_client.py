@@ -234,3 +234,41 @@ def test_discover_passes_min_reputation_and_model():
     url = str(route.calls[0].request.url)
     assert "min_reputation=0.7" in url
     assert "model=phi3%3Amini" in url or "model=phi3:mini" in url
+
+
+# ---------------------------------------------------------------------------
+# SDK-06: W3C traceparent propagation
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+def test_sdk06_traceparent_sent_on_discover():
+    """SDK-06: every outbound request carries a W3C traceparent header."""
+    route = respx.get(DISCOVER_URL).mock(return_value=httpx.Response(200, json=GOOD_NODES))
+    client = IicpClient(ClientConfig(directory_url=DIRECTORY))
+    client.discover("urn:iicp:intent:llm:chat:v1")
+    header = route.calls[0].request.headers.get("traceparent", "")
+    # format: 00-<32hex>-<16hex>-01
+    parts = header.split("-")
+    assert len(parts) == 4, f"bad traceparent: {header!r}"
+    assert parts[0] == "00"
+    assert len(parts[1]) == 32
+    assert len(parts[2]) == 16
+    assert parts[3] == "01"
+
+
+@respx.mock
+def test_sdk06_traceparent_shared_across_submit():
+    """SDK-06: discover + node POST share the same trace-id within one submit()."""
+    disc_route = respx.get(DISCOVER_URL).mock(return_value=httpx.Response(200, json=GOOD_NODES))
+    task_route = respx.post(TASK_URL).mock(
+        return_value=httpx.Response(200, json={"task_id": "t1", "status": "success", "result": {}})
+    )
+    client = IicpClient(ClientConfig(directory_url=DIRECTORY))
+    client.submit(TaskRequest(intent="urn:iicp:intent:llm:chat:v1", payload={}))
+    disc_tp = disc_route.calls[0].request.headers.get("traceparent", "")
+    task_tp = task_route.calls[0].request.headers.get("traceparent", "")
+    # both must have the same trace-id (index 1)
+    assert disc_tp.split("-")[1] == task_tp.split("-")[1], (
+        f"trace-id mismatch: discover={disc_tp!r} task={task_tp!r}"
+    )

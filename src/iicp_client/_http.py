@@ -1,6 +1,7 @@
 """Internal HTTP helpers — TLS context, timeout normalization."""
 from __future__ import annotations
 
+import secrets
 import ssl
 import time
 from typing import Any
@@ -8,6 +9,17 @@ from typing import Any
 import httpx
 
 from iicp_client.errors import IicpError, from_http
+
+
+def _traceparent() -> str:
+    """Generate a W3C traceparent header value (SDK-06).
+
+    Format: 00-<trace-id>-<parent-id>-01
+    trace-id  = 16 random bytes as 32 hex chars
+    parent-id =  8 random bytes as 16 hex chars
+    flags     = 01 (sampled)
+    """
+    return f"00-{secrets.token_hex(16)}-{secrets.token_hex(8)}-01"
 
 
 def _tls_context(verify: bool) -> ssl.SSLContext | bool:
@@ -27,13 +39,15 @@ async def get_json(
     timeout_ms: int = 5_000,
     component: str = "directory",
     tls_verify: bool = True,
+    traceparent: str | None = None,
 ) -> dict[str, Any]:
     timeout = timeout_ms / 1000.0
+    headers = {"traceparent": traceparent or _traceparent()}
     try:
         async with httpx.AsyncClient(
             timeout=timeout, verify=_tls_context(tls_verify)
         ) as client:
-            resp = await client.get(url, params=params)
+            resp = await client.get(url, params=params, headers=headers)
     except httpx.TimeoutException:
         raise IicpError(
             code="IICP-E003",
@@ -60,15 +74,17 @@ async def post_json(
     timeout_ms: int = 30_000,
     component: str = "adapter",
     tls_verify: bool = True,
+    traceparent: str | None = None,
 ) -> tuple[dict[str, Any], int]:
     """Returns (response_body, elapsed_ms)."""
     timeout = (timeout_ms / 1000.0) + 2.0
+    headers = {"traceparent": traceparent or _traceparent()}
     t0 = time.monotonic()
     try:
         async with httpx.AsyncClient(
             timeout=timeout, verify=_tls_context(tls_verify)
         ) as client:
-            resp = await client.post(url, json=body)
+            resp = await client.post(url, json=body, headers=headers)
     except httpx.TimeoutException:
         raise IicpError(
             code="IICP-E003",

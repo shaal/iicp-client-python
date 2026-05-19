@@ -6,7 +6,7 @@ import re
 import uuid
 from typing import Any
 
-from iicp_client._http import get_json, post_json
+from iicp_client._http import _traceparent, get_json, post_json
 from iicp_client.errors import IicpError
 from iicp_client.types import (
     ChatChoice,
@@ -51,6 +51,8 @@ class IicpClient:
         self,
         intent: str,
         options: DiscoverOptions | None = None,
+        *,
+        traceparent: str | None = None,
     ) -> NodeList:
         """Discover nodes capable of handling *intent*."""
         opts = options or DiscoverOptions()
@@ -73,6 +75,7 @@ class IicpClient:
             timeout_ms=5_000,
             component="directory",
             tls_verify=self._cfg.tls_verify,
+            traceparent=traceparent,
         )
         elapsed = int((time.monotonic() - t0) * 1000)
 
@@ -95,14 +98,18 @@ class IicpClient:
         """Discover → select best node → submit task.
 
         Retries up to max_retries on transient errors (SDK-01).
+        A single W3C traceparent is generated per submit call and propagated
+        to both the discover request and the node POST (SDK-06).
         """
         self._validate_intent(request.intent)
+        tp = _traceparent()  # SDK-06: one trace per operation, shared across calls
         node_list = await self.discover_async(
             request.intent,
             DiscoverOptions(
                 region=request.constraints.region or self._cfg.region,
                 qos=request.constraints.qos,
             ),
+            traceparent=tp,
         )
         if not node_list.nodes:
             raise IicpError(
@@ -135,6 +142,7 @@ class IicpClient:
                     timeout_ms=request.constraints.timeout_ms,
                     component="adapter",
                     tls_verify=self._cfg.tls_verify,
+                    traceparent=tp,
                 )
                 return TaskResponse(
                     task_id=raw.get("task_id", task_id),
