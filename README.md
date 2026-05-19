@@ -32,13 +32,8 @@ from iicp_client import IicpClient, ClientConfig
 async def main():
     client = IicpClient(ClientConfig(directory_url="https://iicp.network/api"))
 
-    nodes = await client.discover_async("urn:iicp:intent:llm:chat:v1")
-    if not nodes.nodes:
-        print("No nodes available")
-        return
-
+    # chat_async discovers, selects best node, and submits in one call
     response = await client.chat_async(
-        node=nodes.nodes[0],
         messages=[{"role": "user", "content": "Hello from IICP!"}],
     )
     print(response.choices[0].message["content"])
@@ -123,7 +118,7 @@ Error codes match the [IICP error reference](https://iicp.network/docs/error-ref
 | SDK-03 | Intent URN pattern validation | ✓ |
 | SDK-04 | `timeout_ms` capped at 120 000 ms | ✓ |
 | SDK-05 | Retry on 429 / 503 with exponential back-off | ✓ |
-| SDK-06 | W3C `traceparent` propagation | ✓ |
+| SDK-06 | W3C `traceparent` propagation | planned |
 
 Conformance tier: `iicp:sdk:v1` (spec S.14) · [Request a badge](https://iicp.network/conformance)
 
