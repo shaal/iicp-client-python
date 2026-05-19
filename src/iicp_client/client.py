@@ -60,6 +60,10 @@ class IicpClient:
             params["region"] = opts.region or self._cfg.region
         if opts.qos:
             params["qos"] = opts.qos
+        if opts.min_reputation is not None:
+            params["min_reputation"] = opts.min_reputation
+        if opts.model:
+            params["model"] = opts.model
 
         import time
         t0 = time.monotonic()

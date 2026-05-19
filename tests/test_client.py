@@ -221,3 +221,16 @@ def test_sdk06_node_token_not_in_error():
     assert secret not in err.message
     assert secret not in str(err)
     assert secret not in repr(err)
+
+@respx.mock
+def test_discover_passes_min_reputation_and_model():
+    """SDK-04 parity: DiscoverOptions.min_reputation + model are sent as query params."""
+    route = respx.get(DISCOVER_URL).mock(return_value=httpx.Response(200, json=GOOD_NODES))
+    client = IicpClient(ClientConfig(directory_url=DIRECTORY))
+    client.discover(
+        "urn:iicp:intent:llm:chat:v1",
+        DiscoverOptions(min_reputation=0.7, model="phi3:mini"),
+    )
+    url = str(route.calls[0].request.url)
+    assert "min_reputation=0.7" in url
+    assert "model=phi3%3Amini" in url or "model=phi3:mini" in url

@@ -91,6 +91,8 @@ class ChatResponse:
 class DiscoverOptions:
     region: str | None = None
     qos: str | None = None
+    min_reputation: float | None = None
+    model: str | None = None
     limit: int = 10
 
 
