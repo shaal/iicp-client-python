@@ -20,9 +20,10 @@ import json
 import logging
 import threading
 import time
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Callable, Coroutine
+from typing import Any
 
 import httpx
 
@@ -37,7 +38,7 @@ _HEARTBEAT_PATH = "/api/v1/heartbeat"
 # Lazy Prometheus import — None until first call, False when unavailable.
 _prom_mod: Any = None
 # Singleton: avoids duplicate metric registration across IicpNode instances.
-_global_metrics: "_Metrics | None" = None
+_global_metrics: _Metrics | None = None
 
 
 def _get_prom() -> Any:
@@ -108,7 +109,7 @@ class _Metrics:
             self.tokens_used_total.labels(intent=intent).inc(tokens)
 
 
-def _get_metrics() -> "_Metrics":
+def _get_metrics() -> _Metrics:
     global _global_metrics
     if _global_metrics is None:
         _global_metrics = _Metrics(_get_prom())
@@ -396,7 +397,7 @@ class IicpNode:
                 t.cancel()
             await self._http.aclose()
 
-    async def __aenter__(self) -> "IicpNode":
+    async def __aenter__(self) -> IicpNode:
         return self
 
     async def __aexit__(self, *_: Any) -> None:

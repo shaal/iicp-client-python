@@ -118,7 +118,7 @@ Error codes match the [IICP error reference](https://iicp.network/docs/error-ref
 | SDK-03 | Intent URN pattern validation | ✓ |
 | SDK-04 | `timeout_ms` capped at 120 000 ms | ✓ |
 | SDK-05 | Retry on 429 / 503 with exponential back-off | ✓ |
-| SDK-06 | W3C `traceparent` propagation | planned |
+| SDK-06 | W3C `traceparent` propagation | ✓ |
 
 Conformance tier: `iicp:sdk:v1` (spec S.14) · [Request a badge](https://iicp.network/conformance)
 
@@ -128,7 +128,7 @@ Conformance tier: `iicp:sdk:v1` (spec S.14) · [Request a badge](https://iicp.ne
 
 ```bash
 pip install -e ".[dev]"   # install with dev deps
-pytest tests/ -v          # run 10 unit tests
+pytest tests/ -v          # run 28 unit tests
 ruff check src tests       # lint
 ```
 

@@ -1,7 +1,9 @@
-"""Integration tests for IicpNode server features.
+"""Integration tests for IicpNode server features — ADR-016 §2/§3.
 
 Spins up a real ThreadingHTTPServer on a free port, exercises the endpoints,
 then shuts it down — no mocking of the HTTP server itself.
+
+Conformance: SDK-03 (node serve), SDK-05 (error codes), SDK-06 (traceparent).
 """
 from __future__ import annotations
 
@@ -17,7 +19,6 @@ from typing import Any
 import pytest
 
 from iicp_client import IicpNode, NodeConfig
-
 
 # ── helpers ─────────────────────────────────────────────────────────────────
 
@@ -40,7 +41,7 @@ class _ServerHandle:
         self._node = IicpNode(config)
         self._thread = threading.Thread(target=self._run, daemon=True)
 
-    def start(self) -> "_ServerHandle":
+    def start(self) -> _ServerHandle:
         self._thread.start()
         for _ in range(40):
             try:
@@ -258,15 +259,19 @@ class TestConcurrencyGate:
 class TestNonceReplay:
     def test_duplicate_nonce_returns_409(self, srv: _ServerHandle):
         nonce = "nonce-unique-xyz-abc"
-        s1, _, _ = srv.post("/v1/task", {"task_id": "t1", "intent": "x", "payload": {}, "nonce": nonce})
-        s2, body2, _ = srv.post("/v1/task", {"task_id": "t2", "intent": "x", "payload": {}, "nonce": nonce})
+        body = {"task_id": "t1", "intent": "x", "payload": {}, "nonce": nonce}
+        s1, _, _ = srv.post("/v1/task", body)
+        body2_req = {"task_id": "t2", "intent": "x", "payload": {}, "nonce": nonce}
+        s2, body2, _ = srv.post("/v1/task", body2_req)
         assert s1 == 200
         assert s2 == 409
         assert body2["error"]["code"] == "IICP-E011"
 
     def test_unique_nonces_both_succeed(self, srv: _ServerHandle):
-        s1, _, _ = srv.post("/v1/task", {"task_id": "t1", "intent": "x", "payload": {}, "nonce": "nonce-a-111"})
-        s2, _, _ = srv.post("/v1/task", {"task_id": "t2", "intent": "x", "payload": {}, "nonce": "nonce-b-222"})
+        t1 = {"task_id": "t1", "intent": "x", "payload": {}, "nonce": "nonce-a"}
+        t2 = {"task_id": "t2", "intent": "x", "payload": {}, "nonce": "nonce-b"}
+        s1, _, _ = srv.post("/v1/task", t1)
+        s2, _, _ = srv.post("/v1/task", t2)
         assert s1 == 200
         assert s2 == 200
 
