@@ -432,3 +432,172 @@ class IicpTcpServer:
         writer.write(resp.encode())
         await writer.drain()
         return True
+
+
+# ── Client ────────────────────────────────────────────────────────────────────
+
+class IicpTcpClientError(RuntimeError):
+    """Raised when an IICP TCP RPC fails (wrong response type, server error, timeout)."""
+
+
+class IicpTcpClient:
+    """Asyncio TCP client speaking native IICP binary framing.
+
+    Symmetric counterpart to IicpTcpServer: consumers connect to a node's
+    port 9484, do INIT/ACK handshake, then issue PING/DISCOVER/CALL requests.
+
+    Usage::
+
+        async with IicpTcpClient("203.0.113.5", 9484) as client:
+            await client.handshake()
+            nodes = await client.discover("urn:iicp:intent:llm:chat:v1")
+            result = await client.call(
+                intent="urn:iicp:intent:llm:chat:v1",
+                payload={"messages": [{"role":"user","content":"hi"}]},
+            )
+
+    The async-context-manager auto-handles connect + CLOSE + disconnect.
+    """
+
+    def __init__(self, host: str, port: int = 9484, *, timeout_s: float = 10.0) -> None:
+        self.host = host
+        self.port = port
+        self.timeout_s = timeout_s
+        self._reader: asyncio.StreamReader | None = None
+        self._writer: asyncio.StreamWriter | None = None
+        # node_id advertised by the server in the ACK payload — populated by handshake().
+        self.peer_node_id: str | None = None
+        # framing_version negotiated in INIT/ACK — populated by handshake().
+        self.framing_version: int | None = None
+
+    async def __aenter__(self) -> "IicpTcpClient":
+        await self.connect()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        try:
+            if self._writer is not None and not self._writer.is_closing():
+                await self.close()
+        finally:
+            await self.disconnect()
+
+    async def connect(self) -> None:
+        # Eagerly check cbor2 is importable so we fail fast.
+        _cbor2()
+        self._reader, self._writer = await asyncio.wait_for(
+            asyncio.open_connection(self.host, self.port), timeout=self.timeout_s,
+        )
+
+    async def disconnect(self) -> None:
+        if self._writer is not None:
+            try:
+                self._writer.close()
+                await self._writer.wait_closed()
+            except Exception:  # noqa: BLE001
+                pass
+        self._reader = None
+        self._writer = None
+
+    async def handshake(self) -> None:
+        """Send INIT, await ACK, populate peer_node_id and framing_version."""
+        assert self._reader is not None and self._writer is not None, "not connected"
+        init_payload = encode_cbor({1: FRAMING_VERSION})
+        self._writer.write(IicpFrame.make(MsgType.INIT, init_payload).encode())
+        await self._writer.drain()
+
+        mt, payload = await self._read_frame()
+        if mt != MsgType.ACK:
+            raise IicpTcpClientError(f"expected ACK (0x02), got 0x{mt:02x}")
+        body = decode_cbor(payload) if payload else {}
+        if isinstance(body, dict):
+            self.framing_version = body.get(1)
+            v = body.get(2)
+            self.peer_node_id = v if isinstance(v, str) else None
+
+    async def ping(self, echo: bytes | None = None) -> bytes | None:
+        """Send PING; return the echoed bytes from the PONG (or None if not echoed)."""
+        assert self._writer is not None
+        payload = encode_cbor({1: echo}) if echo else encode_cbor({})
+        self._writer.write(IicpFrame.make(MsgType.PING, payload).encode())
+        await self._writer.drain()
+        mt, body_bytes = await self._read_frame()
+        if mt != MsgType.PONG:
+            raise IicpTcpClientError(f"expected PONG (0x0a), got 0x{mt:02x}")
+        body = decode_cbor(body_bytes) if body_bytes else {}
+        return body.get(1) if isinstance(body, dict) else None
+
+    async def discover(self, intent: str, *, session_id: str = "discover-1") -> list[dict]:
+        """Send DISCOVER for `intent`; return the nodes list from the RESPONSE."""
+        assert self._writer is not None
+        payload = encode_cbor({2: session_id, 3: intent})
+        self._writer.write(IicpFrame.make(MsgType.DISCOVER, payload).encode())
+        await self._writer.drain()
+        mt, body_bytes = await self._read_frame()
+        if mt != MsgType.RESPONSE:
+            raise IicpTcpClientError(f"expected RESPONSE (0x06), got 0x{mt:02x}")
+        body = decode_cbor(body_bytes)
+        if not isinstance(body, dict):
+            raise IicpTcpClientError(f"DISCOVER response body not a CBOR map: {body!r}")
+        return body.get(20) or []
+
+    async def call(
+        self,
+        intent: str,
+        payload: dict[str, Any],
+        *,
+        session_id: str = "call-1",
+        call_id: str | None = None,
+        timeout_s: float | None = None,
+    ) -> dict[str, Any]:
+        """Send CALL with the given JSON payload; return the CBOR-decoded result dict.
+
+        Raises IicpTcpClientError if the server replies with an error code.
+        """
+        assert self._writer is not None
+        body: dict[int, object] = {
+            2: session_id,
+            3: intent,
+            5: json.dumps(payload).encode("utf-8"),
+        }
+        if call_id is not None:
+            body[15] = call_id
+        self._writer.write(IicpFrame.make(MsgType.CALL, encode_cbor(body)).encode())
+        await self._writer.drain()
+        mt, body_bytes = await self._read_frame(timeout_s=timeout_s)
+        if mt != MsgType.RESPONSE:
+            raise IicpTcpClientError(f"expected RESPONSE (0x06), got 0x{mt:02x}")
+        resp = decode_cbor(body_bytes) if body_bytes else {}
+        if not isinstance(resp, dict):
+            raise IicpTcpClientError(f"CALL response body not a CBOR map: {resp!r}")
+        if 100 in resp:
+            raise IicpTcpClientError(f"server error {resp[100]}: {resp.get(101, '')!r}")
+        result_bytes = resp.get(5)
+        if result_bytes is None:
+            return {}
+        if isinstance(result_bytes, (bytes, bytearray)):
+            decoded = decode_cbor(bytes(result_bytes))
+            return decoded if isinstance(decoded, dict) else {"value": decoded}
+        return result_bytes if isinstance(result_bytes, dict) else {"value": result_bytes}
+
+    async def close(self) -> None:
+        """Send CLOSE (graceful teardown). Server hangs up; caller should disconnect."""
+        if self._writer is None or self._writer.is_closing():
+            return
+        self._writer.write(IicpFrame.make(MsgType.CLOSE, b"").encode())
+        try:
+            await self._writer.drain()
+        except Exception:  # noqa: BLE001
+            pass
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+
+    async def _read_frame(self, timeout_s: float | None = None) -> tuple[int, bytes]:
+        """Read exactly one IICP frame from the wire. Returns (msg_type, payload)."""
+        assert self._reader is not None
+        t = timeout_s if timeout_s is not None else self.timeout_s
+        head = await asyncio.wait_for(self._reader.readexactly(FRAME_HEADER_LEN), timeout=t)
+        magic, _ver, mt, _flags, _res, payload_len = _HEADER_STRUCT.unpack_from(head)
+        if magic != IICP_MAGIC:
+            raise IicpTcpClientError(f"bad magic in response: {magic!r}")
+        payload = await asyncio.wait_for(self._reader.readexactly(payload_len), timeout=t) if payload_len else b""
+        return mt, payload
