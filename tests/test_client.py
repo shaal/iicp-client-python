@@ -1,6 +1,9 @@
 """Unit tests for IicpClient (ADR-016 SDK-01..SDK-06)."""
 from __future__ import annotations
 
+import asyncio
+import json
+
 import httpx
 import pytest
 import respx
@@ -15,6 +18,7 @@ from iicp_client import (
     TaskAuth,
     TaskRequest,
 )
+from iicp_client.node import IicpNode, NodeConfig
 
 DIRECTORY = "https://iicp.test"
 NODE = "https://node.iicp.test"
@@ -259,6 +263,82 @@ def test_sdk06_traceparent_sent_on_discover():
     assert len(parts[1]) == 32
     assert len(parts[2]) == 16
     assert parts[3] == "01"
+
+
+@respx.mock
+def test_node_register_payload_spec_compliant():
+    """iter-1411: register payload matches spec/iicp-dir.md §3.1 — capabilities is an
+    array of {intent, models, max_tokens} objects, not a flat intent string."""
+    route = respx.post("https://iicp.test/v1/register").mock(
+        return_value=httpx.Response(201, json={"node_token": "tok-1", "node_id": "n-1"})
+    )
+    node = IicpNode(NodeConfig(
+        node_id="n-1",
+        endpoint="https://provider.example.com:8080",
+        intent="urn:iicp:intent:llm:chat:v1",
+        model="llama-3-8b",
+        region="eu-central",
+        directory_url="https://iicp.test",
+        max_concurrent=2,
+        tokens_per_min=2000,
+        max_tokens=8192,
+    ))
+    asyncio.run(node.register())
+
+    payload = json.loads(route.calls[0].request.content)
+    assert payload["endpoint"] == "https://provider.example.com:8080"
+    assert payload["region"] == "eu-central"
+    assert payload["limits"] == {"max_concurrent": 2, "tokens_per_min": 2000}
+    assert payload["capabilities"] == [
+        {"intent": "urn:iicp:intent:llm:chat:v1", "models": ["llama-3-8b"], "max_tokens": 8192}
+    ]
+    assert "transport_endpoint" not in payload  # not set → not sent
+    assert "intent" not in payload  # spec rejects flat intent at top level
+
+
+@respx.mock
+def test_node_register_includes_transport_endpoint_when_set():
+    """spec/iicp-dir.md v0.7.0: when transport_endpoint is configured, the SDK MUST
+    advertise it so clients can prefer native IICP binary transport over HTTP."""
+    route = respx.post("https://iicp.test/v1/register").mock(
+        return_value=httpx.Response(201, json={"node_token": "tok-2", "node_id": "n-2"})
+    )
+    node = IicpNode(NodeConfig(
+        node_id="n-2",
+        endpoint="https://provider.example.com:8080",
+        intent="urn:iicp:intent:llm:chat:v1",
+        model="qwen2.5:0.5b",
+        directory_url="https://iicp.test",
+        transport_endpoint="iicp://provider.example.com:9484",
+    ))
+    asyncio.run(node.register())
+
+    payload = json.loads(route.calls[0].request.content)
+    assert payload["transport_endpoint"] == "iicp://provider.example.com:9484"
+    # endpoint is the HTTP control plane; transport_endpoint is the native data plane
+    assert payload["endpoint"].startswith("http")
+
+
+@respx.mock
+def test_node_register_legacy_capabilities_list_folds_into_models():
+    """Back-compat: pre-iter-1411 callers passed `capabilities: list[str]` as
+    extra model names. The new payload shape folds them into the models array
+    so existing operator configs keep working without an API break."""
+    route = respx.post("https://iicp.test/v1/register").mock(
+        return_value=httpx.Response(201, json={"node_token": "tok-3", "node_id": "n-3"})
+    )
+    node = IicpNode(NodeConfig(
+        node_id="n-3",
+        endpoint="https://provider.example.com:8080",
+        intent="urn:iicp:intent:llm:chat:v1",
+        model="llama-3-8b",
+        capabilities=["mistral-7b", "phi-3-mini"],
+        directory_url="https://iicp.test",
+    ))
+    asyncio.run(node.register())
+
+    payload = json.loads(route.calls[0].request.content)
+    assert set(payload["capabilities"][0]["models"]) == {"llama-3-8b", "mistral-7b", "phi-3-mini"}
 
 
 @respx.mock

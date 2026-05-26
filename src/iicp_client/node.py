@@ -64,6 +64,13 @@ class NodeConfig:
     directory_url: str = "https://iicp.network/api"
     timeout: float = _DEFAULT_TIMEOUT
     max_concurrent: int = 4
+    tokens_per_min: int = 10000
+    max_tokens: int = 8192
+    # spec/iicp-dir.md v0.7.0 — optional native IICP binary endpoint (ADR-040).
+    # Scheme MUST be iicp:// (plaintext) or iicpsec:// (TLS); default port 9484.
+    # When set, the directory persists it and clients SHOULD prefer it over
+    # `endpoint` for task CALLs. Leave None for HTTP-only operation.
+    transport_endpoint: str | None = None
 
 
 TaskHandler = Callable[[dict[str, Any]], Coroutine[Any, Any, dict[str, Any]]]
@@ -148,18 +155,42 @@ class IicpNode:
     # ── Directory operations ──────────────────────────────────────────────
 
     async def register(self) -> str:
-        """Register this node with the directory and return the node_token."""
-        payload: dict[str, Any] = {
-            "node_id": self._cfg.node_id,
-            "endpoint": self._cfg.endpoint,
-            "intent": self._cfg.intent,
-        }
-        if self._cfg.model:
-            payload["model"] = self._cfg.model
-        if self._cfg.region:
-            payload["region"] = self._cfg.region
+        """Register this node with the directory and return the node_token.
+
+        Payload conforms to spec/iicp-dir.md §3.1 REGISTER (Phase 1+) plus
+        the v0.7.0 dual-endpoint extension (`transport_endpoint`). Earlier
+        iicp-client versions used a non-spec flat-`intent` shape that the
+        production directory rejects with 422 — fixed in iter-1411.
+        """
+        # Build the spec-compliant capabilities array. Models defaults to
+        # [config.model] when model is set, otherwise empty (directory will
+        # reject; that's a configuration error the operator should fix).
+        models = [self._cfg.model] if self._cfg.model else []
         if self._cfg.capabilities:
-            payload["capabilities"] = self._cfg.capabilities
+            # Legacy flat capabilities list — interpret each entry as an
+            # additional model name for the same intent. Keeps existing
+            # callers working without immediate API break.
+            models = list({*models, *self._cfg.capabilities})
+
+        payload: dict[str, Any] = {
+            "endpoint": self._cfg.endpoint,
+            "region": self._cfg.region or "eu-central",
+            "capabilities": [{
+                "intent": self._cfg.intent,
+                "models": models,
+                "max_tokens": self._cfg.max_tokens,
+            }],
+            "limits": {
+                "max_concurrent": self._cfg.max_concurrent,
+                "tokens_per_min": self._cfg.tokens_per_min,
+            },
+        }
+        # node_id is optional — directory assigns one if absent. Send only when set.
+        if self._cfg.node_id:
+            payload["node_id"] = self._cfg.node_id
+        # spec v0.7.0 — advertise native IICP binary endpoint if configured
+        if self._cfg.transport_endpoint:
+            payload["transport_endpoint"] = self._cfg.transport_endpoint
 
         resp = await self._http.post(
             f"{self._cfg.directory_url.rstrip('/')}{_REGISTER_PATH}",
