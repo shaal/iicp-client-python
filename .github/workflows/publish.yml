@@ -30,8 +30,16 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
       - run: pip install -e ".[dev]" --quiet
+      - name: Verify test deps
+        run: pip list | grep -E "pytest|cbor2|httpx|respx|upnpclient"
       - run: python -m ruff check src tests
-      - run: pytest tests/ -q
+      - name: Run tests (verbose + fail-fast + per-test timeout)
+        # Diagnostic-friendly: -v prints each test name as it starts (so a
+        # hung test reveals itself in logs); --timeout=10 + --timeout-method=
+        # thread forces a SIGABRT if a single test exceeds 10s; -x stops on
+        # first failure so we get the offending traceback front and centre.
+        # The pyproject.toml-level timeout=30 still applies as a fallback.
+        run: pytest tests/ -v --timeout=10 --timeout-method=thread -x
 
   conformance:
     name: Conformance Mark Coverage
