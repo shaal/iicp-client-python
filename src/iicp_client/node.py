@@ -269,6 +269,13 @@ class IicpNode:
         if self._cfg.transport_metadata:
             payload["transport_metadata"] = self._cfg.transport_metadata
 
+        # SDK self-identification — directory surfaces these on /v1/discover
+        # so dashboards can render a language badge. Free-form so future SDKs
+        # in other languages can self-tag without a directory change.
+        from iicp_client import __version__ as _iicp_client_version
+        payload["sdk_language"] = "python"
+        payload["sdk_version"] = _iicp_client_version
+
         # S.12 §2.1 — CIP-D1 policy block. Use the per-config policy if set,
         # otherwise fall back to the module-level cip_policy.get_policy().
         from iicp_client.cip_policy import CooperativeInferencePolicy, get_policy
