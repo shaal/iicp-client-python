@@ -27,6 +27,11 @@ dependencies = [
     "httpx>=0.27",
 ]
 
+[project.scripts]
+# `pip install iicp-client` now ships an `iicp-node` console entry point.
+# Replaces the hand-written sdk_node.py boilerplate operators used to copy.
+iicp-node = "iicp_client.cli:main"
+
 [project.urls]
 Homepage = "https://iicp.network"
 Repository = "https://github.com/RobLe3/iicp-client-python"
