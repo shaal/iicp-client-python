@@ -107,6 +107,22 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Skip directory registration (development / offline mode). "
         "env: IICP_SKIP_REGISTRATION",
     )
+    serve.add_argument(
+        "--auto-detect-nat",
+        action="store_true",
+        default=(_env("IICP_AUTO_DETECT_NAT", "false") or "false").lower() == "true",
+        help="Run detect_nat() at startup to claim a public endpoint via "
+        "UPnP / external-IP probe. Overrides --public-endpoint when a higher-"
+        "tier endpoint is discovered. env: IICP_AUTO_DETECT_NAT",
+    )
+    serve.add_argument(
+        "--external-ip-probe-url",
+        default=_env("IICP_EXTERNAL_IP_PROBE_URL"),
+        help="Optional HTTPS URL returning the operator's public IPv4 in plain "
+        "text (e.g. https://api.ipify.org). Used as fallback when UPnP "
+        "discovery succeeds but GetExternalIPAddress is auth-gated. "
+        "env: IICP_EXTERNAL_IP_PROBE_URL",
+    )
 
     return p
 
@@ -137,6 +153,30 @@ async def _serve(args: argparse.Namespace) -> int:
         max_concurrent=args.max_concurrent,
     )
     node = IicpNode(cfg)
+
+    # Optional ADR-041 NAT detection. Runs detect_nat() to discover a public
+    # endpoint via UPnP / external-IP probe and applies the result to the node
+    # config — this populates transport_method + nat_type + transport_metadata
+    # so the directory's binary NATted validator (#334) accepts the
+    # registration without manual port-forwarding.
+    if args.auto_detect_nat:
+        from iicp_client.nat_detection import detect_nat
+        try:
+            profile = await detect_nat(
+                args.host,
+                args.port,
+                operator_public_endpoint=args.public_endpoint or None,
+                external_ip_probe_url=args.external_ip_probe_url,
+            )
+            logger.info(
+                "NAT detection: tier=%d method=%s public_endpoint=%s",
+                profile.tier,
+                profile.transport_method,
+                getattr(profile, "public_endpoint", None) or "(none)",
+            )
+            node.apply_nat_profile(profile)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("NAT detection failed: %s — continuing without it", exc)
 
     # The handler expects base_url; the CLI's --backend-url is the OpenAI-
     # compatible root. Append /v1 if not already present (Ollama serves at

@@ -223,6 +223,39 @@ async def detect_nat(
             f"tier-1: IGD found ({upnp.igd_device}) but mapping refused — {upnp.error}"
         )
 
+    # External-IP-only fallback: when UPnP failed entirely but the operator
+    # has port-forwarding wired manually (or there's a router-managed mapping
+    # we couldn't detect), the external_ip_probe_url still gives us the WAN
+    # IP. Construct a tier-1-ish public_endpoint optimistically and let the
+    # directory's Layer-2 assertLive probe verify reachability. Failure on
+    # that side will surface clearly via IICP-E036 (#331 Phase B).
+    if external_ip_probe_url:
+        probed = await _probe_external_ip(external_ip_probe_url, timeout_s=min(timeout_s, 5.0))
+        if probed:
+            public_url = f"http://{probed}:{bind_port}"
+            transport_url: str | None = None
+            if transport_port and transport_port != bind_port:
+                transport_url = f"iicp://{probed}:{transport_port}"
+            profile.detection_log.append(
+                f"tier-1-fallback: UPnP failed but external IP probe returned {probed} — "
+                f"advertising {public_url} (verification deferred to directory Layer-2 probe)"
+            )
+            return NatProfile(
+                tier=1,
+                transport_method="external_tunnel",
+                public_endpoint=public_url,
+                transport_endpoint=transport_url,
+                internal_endpoint=profile.internal_endpoint,
+                detection_log=profile.detection_log,
+                operator_guidance=(
+                    "UPnP discovery failed. Advertising the external IP from the probe URL "
+                    f"({probed}). For this to actually be reachable, your router needs a "
+                    f"port-forward rule for port {bind_port} → this host. If "
+                    "registration fails with IICP-E036, add the port-forward or "
+                    "use a tunnel (Cloudflare Tunnel, ngrok)."
+                ),
+            )
+
     profile.operator_guidance = (
         "No automatic port mapping available. Options:\n"
         "  1. Configure your router to forward an external port to this host\n"
