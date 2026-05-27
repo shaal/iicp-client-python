@@ -71,6 +71,20 @@ class NodeConfig:
     # When set, the directory persists it and clients SHOULD prefer it over
     # `endpoint` for task CALLs. Leave None for HTTP-only operation.
     transport_endpoint: str | None = None
+    # #331 Phase A.1 / ADR-041 — NAT-traversal observability fields surfaced
+    # to the directory in the register payload. Populated automatically by
+    # apply_nat_profile() when the operator runs detect_nat() at startup;
+    # set manually if the operator already knows their topology.
+    #
+    # transport_method: one of {direct, upnp_mapped, stun_hole_punch,
+    #                   turn_relay, external_tunnel, unknown, unreachable}
+    # nat_type:         one of {full_cone, restricted_cone, port_restricted,
+    #                   symmetric, unknown} — observability only
+    # transport_metadata: forward-compat slot for ADR-041 transport_candidates[]
+    #                   + relay_endpoint
+    transport_method: str | None = None
+    nat_type: str | None = None
+    transport_metadata: dict | None = None
 
 
 TaskHandler = Callable[[dict[str, Any]], Coroutine[Any, Any, dict[str, Any]]]
@@ -152,6 +166,38 @@ class IicpNode:
         self._nonces_lock = threading.Lock()
         self._metrics = _get_metrics()
 
+    def apply_nat_profile(self, profile: Any) -> None:
+        """Populate transport_endpoint + NAT observability fields from a
+        :class:`iicp_client.nat_detection.NatProfile` produced by
+        :func:`iicp_client.detect_nat`.
+
+        Operators typically call this right after detect_nat() and before
+        register() so the directory receives the discovered public endpoint
+        + transport_method/nat_type/transport_metadata in the same payload.
+
+        Idempotent: only overwrites fields the profile actually carries.
+        """
+        if getattr(profile, "is_reachable", lambda: False)():
+            pub = getattr(profile, "public_endpoint", None)
+            if pub:
+                self._cfg.endpoint = pub
+        tep = getattr(profile, "transport_endpoint", None)
+        if tep:
+            self._cfg.transport_endpoint = tep
+        tm = getattr(profile, "transport_method", None)
+        if tm and tm != "unreachable":
+            self._cfg.transport_method = tm
+        self._cfg.nat_type = self._cfg.nat_type or "unknown"
+        # Surface a small dict of detection metadata so directory operators can
+        # see what tier the SDK landed on without us shipping every detail.
+        tier = getattr(profile, "tier", None)
+        log = getattr(profile, "detection_log", []) or []
+        if tier is not None:
+            self._cfg.transport_metadata = {
+                "tier": tier,
+                "detection_log_tail": log[-1:] if log else [],
+            }
+
     # ── Directory operations ──────────────────────────────────────────────
 
     async def register(self) -> str:
@@ -191,6 +237,14 @@ class IicpNode:
         # spec v0.7.0 — advertise native IICP binary endpoint if configured
         if self._cfg.transport_endpoint:
             payload["transport_endpoint"] = self._cfg.transport_endpoint
+        # #331 / ADR-041 — surface NAT-traversal observability when populated
+        # (typically via apply_nat_profile() after detect_nat())
+        if self._cfg.transport_method:
+            payload["transport_method"] = self._cfg.transport_method
+        if self._cfg.nat_type:
+            payload["nat_type"] = self._cfg.nat_type
+        if self._cfg.transport_metadata:
+            payload["transport_metadata"] = self._cfg.transport_metadata
 
         resp = await self._http.post(
             f"{self._cfg.directory_url.rstrip('/')}{_REGISTER_PATH}",

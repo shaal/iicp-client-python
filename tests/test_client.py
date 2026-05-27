@@ -342,6 +342,104 @@ def test_node_register_legacy_capabilities_list_folds_into_models():
 
 
 @respx.mock
+def test_node_register_includes_nat_observability_when_set():
+    """iter-1426: transport_method / nat_type / transport_metadata appear in the
+    register payload when set on NodeConfig (e.g. via apply_nat_profile)."""
+    route = respx.post("https://iicp.test/v1/register").mock(
+        return_value=httpx.Response(201, json={"node_token": "tok-nat", "node_id": "n-nat"})
+    )
+    node = IicpNode(NodeConfig(
+        node_id="n-nat",
+        endpoint="https://provider.example.com:8080",
+        intent="urn:iicp:intent:llm:chat:v1",
+        model="qwen2.5:0.5b",
+        directory_url="https://iicp.test",
+        transport_endpoint="iicp://provider.example.com:9484",
+        transport_method="upnp_mapped",
+        nat_type="full_cone",
+        transport_metadata={"tier": 1, "detection_log_tail": ["upnp ok"]},
+    ))
+    asyncio.run(node.register())
+
+    payload = json.loads(route.calls[0].request.content)
+    assert payload["transport_method"] == "upnp_mapped"
+    assert payload["nat_type"] == "full_cone"
+    assert payload["transport_metadata"] == {"tier": 1, "detection_log_tail": ["upnp ok"]}
+
+
+@respx.mock
+def test_apply_nat_profile_populates_fields_from_nat_profile():
+    """iter-1426: IicpNode.apply_nat_profile(profile) sets transport_endpoint +
+    observability fields from a detect_nat() result. After apply, register()
+    must include them."""
+    from iicp_client.nat_detection import NatProfile
+
+    profile = NatProfile(
+        tier=1,
+        transport_method="upnp_mapped",
+        public_endpoint="http://203.0.113.5:8080",
+        transport_endpoint="iicp://203.0.113.5:9484",
+        detection_log=["tier-1: UPnP mapped 8080 → http://203.0.113.5:8080"],
+    )
+    route = respx.post("https://iicp.test/v1/register").mock(
+        return_value=httpx.Response(201, json={"node_token": "tok-applied", "node_id": "n-applied"})
+    )
+    node = IicpNode(NodeConfig(
+        node_id="n-applied",
+        endpoint="http://placeholder.example.com:8080",  # overridden by apply_nat_profile
+        intent="urn:iicp:intent:llm:chat:v1",
+        model="q",
+        directory_url="https://iicp.test",
+    ))
+    node.apply_nat_profile(profile)
+    asyncio.run(node.register())
+
+    payload = json.loads(route.calls[0].request.content)
+    # endpoint overridden by the discovered public URL
+    assert payload["endpoint"] == "http://203.0.113.5:8080"
+    assert payload["transport_endpoint"] == "iicp://203.0.113.5:9484"
+    assert payload["transport_method"] == "upnp_mapped"
+    assert payload["nat_type"] == "unknown"  # set by helper when none provided
+    assert payload["transport_metadata"]["tier"] == 1
+    assert payload["transport_metadata"]["detection_log_tail"] == [
+        "tier-1: UPnP mapped 8080 → http://203.0.113.5:8080"
+    ]
+
+
+@respx.mock
+def test_apply_nat_profile_unreachable_does_not_overwrite_endpoint():
+    """iter-1426: a tier-4 (unreachable) profile must NOT silently overwrite
+    a previously-set endpoint with nothing — operator might still have a
+    valid manual endpoint configured."""
+    from iicp_client.nat_detection import NatProfile
+
+    profile = NatProfile(
+        tier=4,
+        transport_method="unreachable",
+        public_endpoint=None,
+        operator_guidance="install upnpclient",
+    )
+    route = respx.post("https://iicp.test/v1/register").mock(
+        return_value=httpx.Response(201, json={"node_token": "tok-keep", "node_id": "n-keep"})
+    )
+    node = IicpNode(NodeConfig(
+        node_id="n-keep",
+        endpoint="https://manual-endpoint.example.com:8080",
+        intent="urn:iicp:intent:llm:chat:v1",
+        model="q",
+        directory_url="https://iicp.test",
+    ))
+    node.apply_nat_profile(profile)
+    asyncio.run(node.register())
+
+    payload = json.loads(route.calls[0].request.content)
+    # endpoint preserved — apply_nat_profile only overwrites on reachable
+    assert payload["endpoint"] == "https://manual-endpoint.example.com:8080"
+    # transport_method "unreachable" filtered out — not surfaced to directory
+    assert "transport_method" not in payload
+
+
+@respx.mock
 def test_sdk06_traceparent_shared_across_submit():
     """SDK-06: discover + node POST share the same trace-id within one submit()."""
     disc_route = respx.get(DISCOVER_URL).mock(return_value=httpx.Response(200, json=GOOD_NODES))
