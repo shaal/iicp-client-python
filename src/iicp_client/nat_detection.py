@@ -1022,14 +1022,12 @@ def _local_global_ipv6_candidates() -> list[str]:
             r = subprocess.run(
                 ["ifconfig"], capture_output=True, text=True, check=False
             )
-            iface_name: str | None = None
             current_temp: list[str] = []
             secured: list[str] = []
             deprecated_or_other: list[str] = []
             for line in r.stdout.splitlines():
                 if line and line[0].isalpha():
-                    iface_name = line.split(":")[0]
-                    continue
+                    continue  # interface-name line — skip
                 line = line.strip()
                 if not line.startswith("inet6 "):
                     continue
