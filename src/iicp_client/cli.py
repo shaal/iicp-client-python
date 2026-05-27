@@ -162,6 +162,12 @@ async def _serve(args: argparse.Namespace) -> int:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
 
+    # CIP toggle via env var — same hook the TS + Rust SDKs use. Safe-off
+    # default; operator opts in by exporting IICP_CIP_ALLOW_WORKER=true.
+    if (os.environ.get("IICP_CIP_ALLOW_WORKER", "") or "").lower() in ("1", "true", "yes"):
+        from iicp_client.cip_policy import configure_policy
+        configure_policy(enabled=True, allow_worker=True, allow_coordinator=True)
+
     # If --node <name> points at a saved config, fill any unset CLI flags
     # from the file. Explicit flags still win — operators iterate by passing
     # `--model phi3:mini` while keeping the rest from disk.
@@ -237,6 +243,31 @@ async def _serve(args: argparse.Namespace) -> int:
             node.apply_nat_profile(profile)
         except Exception as exc:  # noqa: BLE001
             logger.warning("NAT detection failed: %s — continuing without it", exc)
+    else:
+        # #343 — Even without full NAT detection, if the public_endpoint is
+        # a bracketed IPv6 URL, attempt to open the UPnP IGDv2 firewall
+        # pinhole proactively. This is the path the maintainer's setup hits:
+        # operator gives `http://[2a0a:...]:8020`, expects the router pinhole
+        # to open automatically. Previously the SDK skipped detect_nat in
+        # this case and never tried AddPinhole.
+        if "[" in (args.public_endpoint or ""):
+            try:
+                from iicp_client.nat_detection import (
+                    NatProfile,
+                    _maybe_open_v6_pinhole_for_endpoint,
+                )
+                synth = NatProfile(
+                    tier=0,
+                    transport_method="direct",
+                    public_endpoint=args.public_endpoint,
+                    detection_log=[],
+                )
+                _maybe_open_v6_pinhole_for_endpoint(synth, args.port)
+                for line in synth.detection_log:
+                    logger.info("v6: %s", line)
+                node.apply_nat_profile(synth)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("IPv6 pinhole attempt failed: %s", exc)
 
     # The handler expects base_url; the CLI's --backend-url is the OpenAI-
     # compatible root. Append /v1 if not already present (Ollama serves at
