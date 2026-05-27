@@ -184,6 +184,25 @@ async def detect_nat(
             f"non-routable — falling through to tier-1 UPnP detection."
         )
 
+    # Tier 0 auto-detect — cloud VM with a public IPv4 directly on a local interface.
+    # Runs before UPnP so bare-metal VPS nodes (Hetzner, DigitalOcean) get a direct
+    # endpoint without waiting for IGD discovery.
+    auto_v4 = _detect_public_v4_on_interfaces()
+    if auto_v4:
+        auto_url = f"http://{auto_v4}:{bind_port}"
+        profile.detection_log.append(
+            f"tier-0: auto-detected public IPv4 on local interface → {auto_url!r}"
+        )
+        t0 = NatProfile(
+            tier=0,
+            transport_method="direct",
+            public_endpoint=auto_url,
+            internal_endpoint=profile.internal_endpoint,
+            detection_log=profile.detection_log,
+            ipv6=profile.ipv6,
+        )
+        return t0
+
     # Tier 1 — UPnP
     ports_to_map: list[int] = [bind_port]
     if transport_port and transport_port != bind_port:
@@ -583,6 +602,55 @@ def _detect_local_ip_for_default_gateway() -> str:
         return "127.0.0.1"
     finally:
         s.close()
+
+
+def _detect_public_v4_on_interfaces() -> str | None:
+    """Cloud-VM auto-detect: returns the first public-routable IPv4 found on
+    a local network interface.
+
+    Covers bare-metal VPS scenarios (Hetzner, DigitalOcean, Vultr, Linode)
+    where the public IP is assigned directly to an interface (eth0/ens3/etc.)
+    rather than via NAT. On AWS/GCP the instance typically sees a private IP
+    only — this returns None and the caller falls through to UPnP and beyond.
+
+    Uses `ifaddr` when available (iicp-client[nat] dep); falls back to the
+    UDP-socket default-route trick which reveals the primary IP only.
+    """
+    candidates: list[str] = []
+    try:
+        import ifaddr  # type: ignore[import-untyped]
+
+        for adapter in ifaddr.get_adapters():
+            for ip in adapter.ips:
+                # ifaddr returns IPv4 as plain str, IPv6 as (str, scope_id) tuple
+                if isinstance(ip.ip, str):
+                    candidates.append(ip.ip)
+    except ImportError:
+        pass
+
+    # Fallback: OS-chosen source IP for the default-gateway route.
+    candidates.append(_detect_local_ip_for_default_gateway())
+
+    for ip_str in candidates:
+        try:
+            addr = ipaddress.IPv4Address(ip_str)
+        except ValueError:
+            continue
+        if (
+            not addr.is_private
+            and not addr.is_loopback
+            and not addr.is_link_local
+            and not addr.is_multicast
+            and not addr.is_reserved
+            and not addr.is_unspecified
+            and not (
+                ipaddress.IPv4Address("100.64.0.0")
+                <= addr
+                <= ipaddress.IPv4Address("100.127.255.255")
+            )
+        ):
+            return ip_str
+    return None
 
 
 # ── External-IP probe + routability helpers ──────────────────────────────────
