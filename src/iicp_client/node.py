@@ -522,6 +522,7 @@ class IicpNode:
                     if traceparent:
                         body.setdefault("_trace", {})["traceparent"] = traceparent
 
+                    task_id = body.get("task_id", "")
                     intent = body.get("intent") or node._cfg.intent
                     constraints = body.get("constraints") or {}
                     qos = (
@@ -530,17 +531,22 @@ class IicpNode:
                         else "best_effort"
                     )
 
+                    from iicp_client.otel_tracer import task_execute_span, task_validate_span
+                    with task_validate_span(task_id):
+                        pass  # nonce check already completed above; span marks validation done
+
                     try:
-                        result = asyncio.run_coroutine_threadsafe(handler(body), loop).result(
-                            timeout=60
-                        )
+                        with task_execute_span(task_id, intent):
+                            result = asyncio.run_coroutine_threadsafe(handler(body), loop).result(
+                                timeout=60
+                            )
                         latency_ms = (time.monotonic() - t0) * 1000
                         usage = result.get("usage") or {}
                         tokens = usage.get("total_tokens", 0) if isinstance(usage, dict) else 0
                         node._metrics.observe("completed", intent, qos, latency_ms, tokens)
                         resp_body = json.dumps(
                             {
-                                "task_id": body.get("task_id", ""),
+                                "task_id": task_id,
                                 "status": "completed",
                                 **result,
                             }

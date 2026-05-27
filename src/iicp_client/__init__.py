@@ -16,6 +16,7 @@ from iicp_client.conformance import ConformanceReport, ProbeResult, run_conforma
 from iicp_client.errors import IicpError
 from iicp_client.iicp_tcp import IicpTcpClient, IicpTcpClientError, IicpTcpServer, MsgType
 from iicp_client.nat_detection import NatProfile, delete_ipv6_pinhole, detect_nat, renew_ipv6_pinhole
+from iicp_client.otel_tracer import task_execute_span, task_validate_span
 from iicp_client.node import IicpNode, NodeConfig
 from iicp_client.pricing import PricingConfig, build_pricing_block, sign_body, verify_signature
 from iicp_client.types import (
@@ -67,5 +68,7 @@ __all__ = [
     "get_cip_policy",
     "run_conformance_checks",
     "sign_body",
+    "task_execute_span",
+    "task_validate_span",
     "verify_signature",
 ]
