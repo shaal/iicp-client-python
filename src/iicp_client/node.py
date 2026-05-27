@@ -90,6 +90,16 @@ class NodeConfig:
     # Operators with CIP-Provider mode enabled either pass a CooperativeInferencePolicy
     # here OR call cip_policy.configure_policy() before register().
     cip_policy: object | None = None
+    # ADR-019 declarative pricing block surfaced to the directory at register.
+    # When None, the SDK does not advertise pricing (directory defaults to 1.0
+    # multiplier). When set with `sign_declarations=True` AND a node_hmac_key
+    # is provisioned, the SDK signs the pricing body with HMAC-SHA256 so the
+    # directory marks `pricing.attested=true` in /v1/discover.
+    pricing: object | None = None
+    # Operator-provisioned HMAC key for ADR-019 signing. If empty, the SDK
+    # falls back to the key the directory returned on register (populated
+    # by register() into IicpNode._node_hmac_key for subsequent calls).
+    node_hmac_key: str = ""
 
 
 TaskHandler = Callable[[dict[str, Any]], Coroutine[Any, Any, dict[str, Any]]]
@@ -170,6 +180,11 @@ class IicpNode:
         self._nonces: dict[str, float] = {}
         self._nonces_lock = threading.Lock()
         self._metrics = _get_metrics()
+        # ADR-019: HMAC key for signing pricing declarations. Initialized from
+        # NodeConfig.node_hmac_key; overwritten from the directory's response
+        # on register() so subsequent re-registrations (after expiry) sign
+        # with the directory-issued key.
+        self._node_hmac_key: str = config.node_hmac_key
 
     def apply_nat_profile(self, profile: Any) -> None:
         """Populate transport_endpoint + NAT observability fields from a
@@ -262,6 +277,19 @@ class IicpNode:
             if block:
                 payload["policy"] = block
 
+        # ADR-019 — declarative pricing block. Operator-controlled; when
+        # sign_declarations=True AND a HMAC key is present, sign the body so
+        # the directory marks pricing.attested=true in /v1/discover.
+        from iicp_client.pricing import PricingConfig, build_pricing_block
+        if isinstance(self._cfg.pricing, PricingConfig):
+            payload["pricing"] = build_pricing_block(
+                self._cfg.pricing, hmac_key=self._node_hmac_key
+            )
+        # When the operator pre-provisions a node_hmac_key, surface it so the
+        # directory's RegisterController uses it instead of generating one.
+        if self._cfg.node_hmac_key:
+            payload["node_hmac_key"] = self._cfg.node_hmac_key
+
         resp = await self._http.post(
             f"{self._cfg.directory_url.rstrip('/')}{_REGISTER_PATH}",
             json=payload,
@@ -271,8 +299,20 @@ class IicpNode:
         token = data.get("node_token") or data.get("token")
         if not token:
             raise RuntimeError(f"Directory did not return node_token: {data}")
+        # ADR-019: capture the directory-issued HMAC key for subsequent
+        # pricing signatures. Operator-provisioned key wins when set.
+        if not self._node_hmac_key:
+            hk = data.get("node_hmac_key", "")
+            if hk:
+                self._node_hmac_key = str(hk)
         logger.info("Registered node %s, token acquired", self._cfg.node_id)
         return str(token)
+
+    @property
+    def node_hmac_key(self) -> str:
+        """The HMAC key in use for ADR-019 pricing signatures (empty if
+        unregistered AND no operator-provisioned key)."""
+        return self._node_hmac_key
 
     async def heartbeat(self, node_token: str) -> None:
         """Send a single heartbeat to the directory."""

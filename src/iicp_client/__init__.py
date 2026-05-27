@@ -10,6 +10,7 @@ from iicp_client.cip_policy import (
 )
 from iicp_client.iicp_tcp import IicpTcpClient, IicpTcpClientError, IicpTcpServer, MsgType
 from iicp_client.nat_detection import NatProfile, detect_nat
+from iicp_client.pricing import PricingConfig, build_pricing_block, sign_body, verify_signature
 from iicp_client.node import IicpNode, NodeConfig
 from iicp_client.types import (
     ChatMessage,
@@ -48,6 +49,10 @@ __all__ = [
     "CooperativeInferencePolicy",
     "DiscoverOptions",
     "NodeList",
+    "PricingConfig",
+    "build_pricing_block",
     "configure_cip_policy",
     "get_cip_policy",
+    "sign_body",
+    "verify_signature",
 ]
