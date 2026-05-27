@@ -33,15 +33,13 @@ jobs:
       - name: Verify test deps
         run: pip list | grep -E "pytest|cbor2|httpx|respx|upnpclient"
       - run: python -m ruff check src tests
-      - name: Run tests (verbose + fail-fast + per-test timeout)
-        # Diagnostic-friendly: -v prints each test name as it starts;
-        # --timeout=10 + --timeout-method=signal kills any test exceeding
-        # 10s via SIGALRM (Linux-only; more reliable than thread method
-        # for asyncio tests on GH runners); -x stops on first failure.
-        # test_serve.py is temporarily excluded — it uses a thread-pool +
-        # asyncio event-loop pattern that hangs on github-hosted runners
-        # but passes locally. Tracked as a follow-up.
-        run: pytest tests/ -v --timeout=10 --timeout-method=signal -x --ignore=tests/test_serve.py
+      - name: Run tests
+        # test_serve.py was previously quarantined (iter-1446) because its
+        # _ServerHandle fixture used loop.stop() which exits run_until_complete
+        # without unwinding through node.serve()'s `finally: server.shutdown()`,
+        # leaking the http.server thread. iter-1447 switched the fixture to
+        # cancel the serve task instead, which unwinds cleanly. Now reinstated.
+        run: pytest tests/ -q --timeout=10 --timeout-method=signal
 
   conformance:
     name: Conformance Mark Coverage

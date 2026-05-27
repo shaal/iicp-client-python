@@ -35,16 +35,32 @@ async def _echo_handler(task: dict) -> dict:
 
 
 class _ServerHandle:
-    """Runs IicpNode.serve in a background asyncio loop + thread."""
+    """Runs IicpNode.serve in a background asyncio loop + thread.
+
+    Shutdown discipline (iter-1447 fix): teardown CANCELS the serve task
+    instead of calling loop.stop(). loop.stop() exits run_until_complete
+    without unwinding the coroutine through its `finally:` block, so the
+    underlying http.server.serve_forever in run_in_executor never gets
+    server.shutdown() called → executor thread leaks. On macOS the daemon
+    thread is reaped at process exit so the fixture appears to work; on
+    Linux (github-hosted runners) pytest's exit-handler waits indefinitely.
+
+    Cancelling the task triggers the coroutine's finally block → calls
+    server.shutdown() → serve_forever exits cleanly → no thread leak.
+    """
 
     def __init__(self, config: NodeConfig):
         self.port = _free_port()
-        self._loop = asyncio.new_event_loop()
         self._node = IicpNode(config)
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._task: asyncio.Task | None = None
+        self._ready = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
     def start(self) -> _ServerHandle:
         self._thread.start()
+        # Wait for the loop + task to be initialised so stop() can find them.
+        self._ready.wait(timeout=5)
         for _ in range(40):
             try:
                 with socket.create_connection(("127.0.0.1", self.port), timeout=0.1):
@@ -54,14 +70,35 @@ class _ServerHandle:
         return self
 
     def stop(self) -> None:
-        self._loop.call_soon_threadsafe(self._loop.stop)
-        self._thread.join(timeout=2)
+        if self._loop is None or self._task is None:
+            return
+        loop = self._loop
+        task = self._task
+        # Cancel the serve coroutine on its own loop. This unwinds through
+        # node.serve()'s `finally: server.shutdown()` which exits serve_forever
+        # and lets the executor thread terminate cleanly.
+        loop.call_soon_threadsafe(task.cancel)
+        self._thread.join(timeout=5)
 
     def _run(self) -> None:
+        self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
-        self._loop.run_until_complete(
+        self._task = self._loop.create_task(
             self._node.serve(_echo_handler, host="127.0.0.1", port=self.port)
         )
+        self._ready.set()
+        try:
+            self._loop.run_until_complete(self._task)
+        except (asyncio.CancelledError, concurrent.futures.CancelledError):
+            pass
+        except RuntimeError:
+            # run_until_complete on a cancelled task can raise this too.
+            pass
+        finally:
+            try:
+                self._loop.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     def get(self, path: str) -> tuple[int, Any]:
         conn = HTTPConnection("127.0.0.1", self.port, timeout=3)
@@ -210,20 +247,34 @@ class TestConcurrencyGate:
             intent="urn:iicp:intent:llm:chat:v1",
             max_concurrent=1,
         )
-        h = _ServerHandle.__new__(_ServerHandle)
-        h.port = _free_port()
-        h._loop = asyncio.new_event_loop()
-        h._node = IicpNode(cfg)
-        h._thread = threading.Thread(
-            daemon=True,
-            target=lambda: (
-                asyncio.set_event_loop(h._loop),
-                h._loop.run_until_complete(
-                    h._node.serve(_slow_handler, host="127.0.0.1", port=h.port)
-                ),
-            ),
-        )
+        h = _ServerHandle(cfg)
+        # Replace the default echo handler with the slow one.
+        # _ServerHandle.start() creates loop + task with _echo_handler by
+        # default; for this test we need _slow_handler. Patch by overriding
+        # the _run method via a custom thread before .start().
+        h._task = None
+        h._loop = None
+
+        def _run_slow() -> None:
+            h._loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(h._loop)
+            h._task = h._loop.create_task(
+                h._node.serve(_slow_handler, host="127.0.0.1", port=h.port)
+            )
+            h._ready.set()
+            try:
+                h._loop.run_until_complete(h._task)
+            except (asyncio.CancelledError, concurrent.futures.CancelledError, RuntimeError):
+                pass
+            finally:
+                try:
+                    h._loop.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+        h._thread = threading.Thread(target=_run_slow, daemon=True)
         h._thread.start()
+        h._ready.wait(timeout=5)
         for _ in range(40):
             try:
                 with socket.create_connection(("127.0.0.1", h.port), timeout=0.1):
@@ -254,8 +305,7 @@ class TestConcurrencyGate:
             slow_release.set()
             f1.result(timeout=3)
 
-        h._loop.call_soon_threadsafe(h._loop.stop)
-        h._thread.join(timeout=2)
+        h.stop()
 
         assert 429 in results
 
@@ -304,18 +354,30 @@ class TestTraceparent:
             endpoint="http://trace.local",
             intent="urn:iicp:intent:llm:chat:v1",
         )
-        h = _ServerHandle.__new__(_ServerHandle)
-        h.port = _free_port()
-        h._loop = asyncio.new_event_loop()
-        h._node = IicpNode(cfg)
-        h._thread = threading.Thread(
-            daemon=True,
-            target=lambda: (
-                asyncio.set_event_loop(h._loop),
-                h._loop.run_until_complete(h._node.serve(_capture, host="127.0.0.1", port=h.port)),
-            ),
-        )
+        h = _ServerHandle(cfg)
+        h._task = None
+        h._loop = None
+
+        def _run_capture() -> None:
+            h._loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(h._loop)
+            h._task = h._loop.create_task(
+                h._node.serve(_capture, host="127.0.0.1", port=h.port)
+            )
+            h._ready.set()
+            try:
+                h._loop.run_until_complete(h._task)
+            except (asyncio.CancelledError, concurrent.futures.CancelledError, RuntimeError):
+                pass
+            finally:
+                try:
+                    h._loop.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+        h._thread = threading.Thread(target=_run_capture, daemon=True)
         h._thread.start()
+        h._ready.wait(timeout=5)
         for _ in range(40):
             try:
                 with socket.create_connection(("127.0.0.1", h.port), timeout=0.1):
@@ -326,8 +388,7 @@ class TestTraceparent:
         tp = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
         h.post("/v1/task", {"task_id": "t1", "intent": "x", "payload": {}}, {"traceparent": tp})
 
-        h._loop.call_soon_threadsafe(h._loop.stop)
-        h._thread.join(timeout=2)
+        h.stop()
 
         assert len(received) == 1
         assert received[0].get("_trace", {}).get("traceparent") == tp
