@@ -26,9 +26,11 @@ import asyncio
 import json
 import logging
 import os
+import subprocess
 import sys
 import urllib.request
 import uuid
+from dataclasses import dataclass as _dc
 
 from iicp_client import IicpNode, NodeConfig
 from iicp_client.backends import openai_compat_handler
@@ -364,8 +366,123 @@ def _cmd_init(args: argparse.Namespace) -> int:
     print(f"  ✓ saved {saved_to}")
     print(f"  ✓ node_id = {node.node_id}")
     print()
+
+    # ── Dependency check + auto-install + docs link (#346) ────────────────
+    print("Checking dependencies …")
+    issues = _check_dependencies(backend_url)
+    _print_dep_status(issues)
+    if any(i.severity == "missing" and i.installable for i in issues):
+        ans = _prompt("Install missing optional deps now? (Y/n)", "y").lower()
+        if ans.startswith("y"):
+            _install_missing(issues)
+    print()
+    print("Documentation:")
+    print("  Operator quickstart: https://iicp.network/docs/sdk-quickstart-docker")
+    print("  CLI reference:       iicp-node --help / iicp-node serve --help")
+    print("  Spec:                https://iicp.network/spec")
+    print()
     print(f"Run: iicp-node serve --node {name}")
     return 0
+
+
+# ── #346 — dependency checker + auto-install ────────────────────────────────
+
+
+@_dc
+class _DepIssue:
+    name: str
+    severity: str  # "missing" | "warn" | "ok"
+    message: str
+    installable: bool = False
+    pip_extra: str = ""
+
+
+def _check_dependencies(backend_url: str) -> list[_DepIssue]:
+    """Probe runtime + optional deps + backend reachability."""
+    out: list[_DepIssue] = []
+
+    # 1) Backend reachability
+    try:
+        with urllib.request.urlopen(
+            backend_url.rstrip("/") + "/api/tags", timeout=2
+        ) as resp:
+            ok = resp.status == 200
+        if ok:
+            out.append(_DepIssue("backend", "ok", f"reachable at {backend_url}"))
+        else:
+            out.append(_DepIssue("backend", "warn", f"backend HTTP {resp.status}"))
+    except Exception as exc:  # noqa: BLE001
+        out.append(_DepIssue("backend", "warn", f"{backend_url} unreachable: {exc}"))
+
+    # 2) Optional Python deps mapped to pip extras
+    optional = [
+        ("cbor2", "iicp-tcp", "native IICP TCP transport (port 9484)"),
+        ("upnpclient", "nat", "UPnP NAT detection + IPv6 firewall pinhole"),
+        ("ifaddr", "nat", "interface enumeration for NAT detection"),
+        ("prometheus_client", "metrics", "/metrics endpoint"),
+    ]
+    for mod, extra, purpose in optional:
+        try:
+            __import__(mod)
+            out.append(_DepIssue(mod, "ok", purpose))
+        except ImportError:
+            out.append(_DepIssue(
+                mod,
+                "missing",
+                f"{purpose} (not installed)",
+                installable=True,
+                pip_extra=extra,
+            ))
+
+    # 3) IPv6 routing surface (advisory — doesn't gate anything)
+    try:
+        import asyncio
+
+        from iicp_client.nat_detection import detect_ipv6
+        v6 = asyncio.get_event_loop().run_until_complete(detect_ipv6(0, timeout_s=1.5)) \
+            if not asyncio.get_event_loop().is_running() else None
+    except Exception:  # noqa: BLE001
+        v6 = None
+    if v6 and v6.global_v6_available:
+        msg = f"{len(v6.addresses)} global IPv6 address(es)"
+        if v6.external_v6_reachable:
+            msg += "; outbound v6 reachable"
+        out.append(_DepIssue("ipv6", "ok", msg))
+    elif v6:
+        out.append(_DepIssue(
+            "ipv6",
+            "warn",
+            "no global IPv6 — direct hosting will require IPv4 + tunnel",
+        ))
+
+    return out
+
+
+def _print_dep_status(issues: list[_DepIssue]) -> None:
+    glyph = {"ok": "  ✓", "warn": "  !", "missing": "  ✗"}
+    for i in issues:
+        print(f"{glyph.get(i.severity, '  ?')} {i.name:18}  {i.message}")
+
+
+def _install_missing(issues: list[_DepIssue]) -> None:
+    """Run `pip install iicp-client[<extras>]` for the missing-optional set."""
+    extras = sorted({
+        i.pip_extra
+        for i in issues
+        if i.severity == "missing" and i.installable and i.pip_extra
+    })
+    if not extras:
+        return
+    spec = f"iicp-client[{','.join(extras)}]"
+    print(f"\n  → pip install --upgrade {spec}")
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--upgrade", spec],
+            check=True,
+        )
+        print("  ✓ done")
+    except subprocess.CalledProcessError as exc:
+        sys.stderr.write(f"  ✗ pip install failed (exit={exc.returncode})\n")
 
 
 def _cmd_list(_args: argparse.Namespace) -> int:
