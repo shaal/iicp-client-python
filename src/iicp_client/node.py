@@ -85,6 +85,11 @@ class NodeConfig:
     transport_method: str | None = None
     nat_type: str | None = None
     transport_metadata: dict | None = None
+    # S.12 §2.1 — CIP-D1 policy block surfaced to the directory's register
+    # payload. When None, the SDK falls back to iicp_client.cip_policy.get_policy().
+    # Operators with CIP-Provider mode enabled either pass a CooperativeInferencePolicy
+    # here OR call cip_policy.configure_policy() before register().
+    cip_policy: object | None = None
 
 
 TaskHandler = Callable[[dict[str, Any]], Coroutine[Any, Any, dict[str, Any]]]
@@ -245,6 +250,17 @@ class IicpNode:
             payload["nat_type"] = self._cfg.nat_type
         if self._cfg.transport_metadata:
             payload["transport_metadata"] = self._cfg.transport_metadata
+
+        # S.12 §2.1 — CIP-D1 policy block. Use the per-config policy if set,
+        # otherwise fall back to the module-level cip_policy.get_policy().
+        from iicp_client.cip_policy import CooperativeInferencePolicy, get_policy
+        policy_obj = self._cfg.cip_policy
+        if policy_obj is None:
+            policy_obj = get_policy()
+        if isinstance(policy_obj, CooperativeInferencePolicy):
+            block = policy_obj.as_register_policy_block()
+            if block:
+                payload["policy"] = block
 
         resp = await self._http.post(
             f"{self._cfg.directory_url.rstrip('/')}{_REGISTER_PATH}",

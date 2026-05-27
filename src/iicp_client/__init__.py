@@ -3,6 +3,11 @@
 from iicp_client.client import IicpClient
 from iicp_client.errors import IicpError
 from iicp_client.backends import openai_compat_handler
+from iicp_client.cip_policy import (
+    CooperativeInferencePolicy,
+    configure_policy as configure_cip_policy,
+    get_policy as get_cip_policy,
+)
 from iicp_client.iicp_tcp import IicpTcpClient, IicpTcpClientError, IicpTcpServer, MsgType
 from iicp_client.nat_detection import NatProfile, detect_nat
 from iicp_client.node import IicpNode, NodeConfig
@@ -40,6 +45,9 @@ __all__ = [
     "ChatMessage",
     "ChatOptions",
     "ChatResponse",
+    "CooperativeInferencePolicy",
     "DiscoverOptions",
     "NodeList",
+    "configure_cip_policy",
+    "get_cip_policy",
 ]
