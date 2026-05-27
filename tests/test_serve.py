@@ -170,6 +170,9 @@ class TestHealth:
         assert "max_concurrent" in body
         assert "available" in body
         assert "load" in body
+        # #343 — pinhole_state always surfaced (active: False when no pinhole opened)
+        assert "pinhole_state" in body
+        assert body["pinhole_state"]["active"] is False
 
     def test_health_max_concurrent_matches_config(self, srv: _ServerHandle):
         _, body = srv.get("/iicp/health")

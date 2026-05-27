@@ -15,7 +15,7 @@ from iicp_client.concurrency import CapacityExceededError, ConcurrencyGate
 from iicp_client.conformance import ConformanceReport, ProbeResult, run_conformance_checks
 from iicp_client.errors import IicpError
 from iicp_client.iicp_tcp import IicpTcpClient, IicpTcpClientError, IicpTcpServer, MsgType
-from iicp_client.nat_detection import NatProfile, detect_nat
+from iicp_client.nat_detection import NatProfile, delete_ipv6_pinhole, detect_nat, renew_ipv6_pinhole
 from iicp_client.node import IicpNode, NodeConfig
 from iicp_client.pricing import PricingConfig, build_pricing_block, sign_body, verify_signature
 from iicp_client.types import (
@@ -42,7 +42,9 @@ __all__ = [
     "MsgType",
     "NatProfile",
     "NodeConfig",
+    "delete_ipv6_pinhole",
     "detect_nat",
+    "renew_ipv6_pinhole",
     "openai_compat_handler",
     "ClientConfig",
     "TaskAuth",

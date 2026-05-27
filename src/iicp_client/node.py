@@ -34,7 +34,12 @@ _DEFAULT_TIMEOUT = 5.0
 _HEARTBEAT_INTERVAL = 30
 _NONCE_TTL = 300
 _REGISTER_PATH = "/v1/register"
-_HEARTBEAT_PATH = "/api/v1/heartbeat"
+# Heartbeat path is /v1/heartbeat (NOT /api/v1/heartbeat) because the
+# default directory_url already ends in /api. Previous double-/api/ bug
+# made all heartbeats 404 — nodes registered fine but never updated
+# `last_seen`, so they aged out of the 90s freshness window and the
+# directory's stats endpoint always showed Active nodes: 0.
+_HEARTBEAT_PATH = "/v1/heartbeat"
 
 # Lazy Prometheus import — None until first call, False when unavailable.
 _prom_mod: Any = None
@@ -188,8 +193,9 @@ class IicpNode:
         self._node_hmac_key: str = config.node_hmac_key
         # #343 — UPnP IPv6 pinhole tracking. Set by apply_nat_profile() when
         # detect_nat opened a firewall pinhole; consumed by _revoke_pinhole()
-        # on graceful shutdown to avoid leaving stale firewall rules.
+        # on graceful shutdown and the renewal loop.
         self._pinhole_uid: int | None = None
+        self._pinhole_lease_seconds: int = 3600
 
     def apply_nat_profile(self, profile: Any) -> None:
         """Populate transport_endpoint + NAT observability fields from a
@@ -220,6 +226,9 @@ class IicpNode:
             uid = getattr(ipv6, "pinhole_unique_id", None)
             if isinstance(uid, int):
                 self._pinhole_uid = uid
+            lease = getattr(ipv6, "pinhole_lease_seconds", None)
+            if isinstance(lease, int) and lease > 0:
+                self._pinhole_lease_seconds = lease
         # Surface a small dict of detection metadata so directory operators can
         # see what tier the SDK landed on without us shipping every detail.
         tier = getattr(profile, "tier", None)
@@ -338,9 +347,16 @@ class IicpNode:
         return self._node_hmac_key
 
     async def heartbeat(self, node_token: str) -> None:
-        """Send a single heartbeat to the directory."""
+        """Send a single heartbeat to the directory.
+
+        Requires `Authorization: Bearer <node_token>` because the
+        directory's `/v1/heartbeat` route is guarded by NodeTokenAuth.
+        The token also stays in the JSON body for back-compat with
+        older directory builds that read it from the payload.
+        """
         resp = await self._http.post(
             f"{self._cfg.directory_url.rstrip('/')}{_HEARTBEAT_PATH}",
+            headers={"Authorization": f"Bearer {node_token}"},
             json={
                 "node_id": self._cfg.node_id,
                 "node_token": node_token,
@@ -418,6 +434,12 @@ class IicpNode:
                 with node._jobs_lock:
                     active = node._active_jobs
                 denom = node._cfg.max_concurrent or 1
+                uid = node._pinhole_uid
+                pinhole_state = (
+                    {"active": True, "unique_id": uid, "lease_seconds": node._pinhole_lease_seconds}
+                    if uid is not None
+                    else {"active": False}
+                )
                 body = json.dumps(
                     {
                         "status": "ok",
@@ -429,6 +451,7 @@ class IicpNode:
                         "available": active < node._cfg.max_concurrent,
                         "model": node._cfg.model or "",
                         "intent": node._cfg.intent,
+                        "pinhole_state": pinhole_state,
                     }
                 ).encode()
                 self._json_response(200, body)
@@ -548,6 +571,8 @@ class IicpNode:
         bg_tasks: list[asyncio.Task] = []
         if node_token:
             bg_tasks.append(asyncio.create_task(self._heartbeat_loop(node_token)))
+        if self._pinhole_uid is not None:
+            bg_tasks.append(asyncio.create_task(self._pinhole_renewal_loop()))
 
         try:
             await loop.run_in_executor(None, server.serve_forever)
@@ -585,6 +610,28 @@ class IicpNode:
         )
         resp.raise_for_status()
         logger.info("deregistered node %s", self._cfg.node_id)
+
+    async def _pinhole_renewal_loop(self) -> None:
+        """Background task: renew the UPnP IPv6 pinhole at lease/2 intervals (#343).
+
+        Fires when serve() detects a tracked pinhole. Best-effort: any renewal
+        failure is logged and the loop continues — the IGD lease will eventually
+        expire, but we keep trying so brief IGD hiccups don't kill the session.
+        """
+        from iicp_client.nat_detection import renew_ipv6_pinhole
+        while True:
+            delay = max(self._pinhole_lease_seconds // 2, 60)
+            await asyncio.sleep(delay)
+            uid = self._pinhole_uid
+            if uid is None:
+                return
+            ok = await asyncio.get_event_loop().run_in_executor(
+                None, renew_ipv6_pinhole, uid, self._pinhole_lease_seconds
+            )
+            if ok:
+                logger.debug("UPnP IPv6 pinhole uid=%s renewed (lease=%ss)", uid, self._pinhole_lease_seconds)
+            else:
+                logger.warning("UPnP IPv6 pinhole uid=%s renewal failed — will retry at next interval", uid)
 
     def _revoke_pinhole_sync(self) -> None:
         """Close the UPnP IPv6 firewall pinhole if one is tracked (#343).

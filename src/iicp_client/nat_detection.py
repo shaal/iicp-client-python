@@ -1267,6 +1267,35 @@ def delete_ipv6_pinhole(unique_id: int) -> bool:
     return False
 
 
+def renew_ipv6_pinhole(unique_id: int, new_lease_seconds: int = 3600) -> bool:
+    """Extend a previously-opened IPv6 pinhole via ``WANIPv6FirewallControl::UpdatePinhole``.
+
+    Returns True on success. Falls back gracefully when the IGD is unreachable
+    or doesn't support UpdatePinhole — in that case the existing lease just
+    runs to expiry (typically 3600s) and the caller can retry on the next cycle.
+    """
+    try:
+        import upnpclient  # type: ignore[import-untyped]
+    except ImportError:
+        return False
+    try:
+        devices = upnpclient.discover(timeout=3)
+    except Exception:  # noqa: BLE001
+        return False
+    for d in devices:
+        for svc in getattr(d, "services", []):
+            if "WANIPv6FirewallControl" not in getattr(svc, "service_type", ""):
+                continue
+            try:
+                svc.UpdatePinhole(UniqueID=unique_id, NewLeaseTime=new_lease_seconds)
+                logger.debug("v6 pinhole: UpdatePinhole(%s) OK — lease extended %ss", unique_id, new_lease_seconds)
+                return True
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("v6 pinhole: UpdatePinhole(%s) failed: %s", unique_id, exc)
+                continue
+    return False
+
+
 def _try_ipv6_fallback(
     profile: NatProfile,
     bind_port: int,
