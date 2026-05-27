@@ -193,12 +193,19 @@ class IicpTcpServer:
         node_id: str | None = None,
         handler: TcpTaskHandler | None = None,
         discover_lookup: DiscoverLookup | None = None,
+        concurrency_gate: object | None = None,
     ) -> None:
         self.host = host
         self.port = port
         self.node_id = node_id
         self.handler = handler
         self.discover_lookup = discover_lookup
+        # Optional ConcurrencyGate (iicp_client.concurrency.ConcurrencyGate).
+        # When set, every CALL frame acquires a slot before invoking the
+        # user handler; CapacityExceededError → RESPONSE with error_code=429
+        # (IICP-E021). Same primitive the HTTP /v1/task path uses, so the
+        # directory's NodeScorer sees back-pressure from either transport.
+        self.concurrency_gate = concurrency_gate
         self._server: asyncio.AbstractServer | None = None
 
     async def start(self) -> None:
@@ -404,20 +411,38 @@ class IicpTcpServer:
                 "intent": intent,
                 "payload": payload_obj,
             }
-            try:
-                handler_result = await self.handler(task)
-                if isinstance(handler_result, dict):
-                    if "error_code" in handler_result:
-                        error_code = int(handler_result["error_code"])
-                        error_message = str(handler_result.get("error_message", "handler error"))
+            # Tier 2 Item 5 (#340): if a ConcurrencyGate is configured, acquire
+            # a slot first. CapacityExceededError → 429 IICP-E021 so the
+            # directory's NodeScorer down-ranks busy nodes consistently
+            # across HTTP and native IICP transports.
+            from iicp_client.concurrency import CapacityExceededError, ConcurrencyGate
+            gate = self.concurrency_gate if isinstance(self.concurrency_gate, ConcurrencyGate) else None
+
+            async def _run_handler() -> None:
+                nonlocal result, error_code, error_message
+                try:
+                    handler_result = await self.handler(task)
+                    if isinstance(handler_result, dict):
+                        if "error_code" in handler_result:
+                            error_code = int(handler_result["error_code"])
+                            error_message = str(handler_result.get("error_message", "handler error"))
+                        else:
+                            result = encode_cbor(handler_result.get("result", handler_result))
                     else:
-                        # Encode the user's response dict as CBOR for transport
-                        result = encode_cbor(handler_result.get("result", handler_result))
-                else:
-                    result = encode_cbor({"result": handler_result})
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("TCP CALL handler raised: %s", exc)
-                error_code, error_message = 500, "handler raised exception"
+                        result = encode_cbor({"result": handler_result})
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("TCP CALL handler raised: %s", exc)
+                    error_code, error_message = 500, "handler raised exception"
+
+            if gate is None:
+                await _run_handler()
+            else:
+                try:
+                    async with gate.acquire():
+                        await _run_handler()
+                except CapacityExceededError as exc:
+                    error_code = 429
+                    error_message = f"IICP-E021: max_concurrent={exc.max_concurrent} reached"
 
         resp = IicpFrame.make(
             MsgType.RESPONSE,
