@@ -354,14 +354,136 @@ async def detect_nat(
     if v6_profile is not None:
         return v6_profile
 
+    # Tier 4 external tunnel auto-detect: ngrok, tailscale funnel, or
+    # IICP_TUNNEL_URL env-var override (cloudflared quick tunnels).
+    tunnel_url = await _detect_external_tunnel(bind_port, timeout_s=min(timeout_s, 3.0))
+    if tunnel_url:
+        profile.detection_log.append(
+            f"tier-4: external tunnel auto-detected → advertising {tunnel_url!r}"
+        )
+        return NatProfile(
+            tier=1,
+            transport_method="external_tunnel",
+            public_endpoint=tunnel_url,
+            internal_endpoint=profile.internal_endpoint,
+            detection_log=profile.detection_log,
+        )
+
     profile.operator_guidance = (
         "No automatic port mapping available. Options:\n"
         "  1. Configure your router to forward an external port to this host\n"
         "  2. Set public_endpoint to your real external URL\n"
-        "  3. Use an external tunnel (Cloudflare Tunnel, ngrok, tailscale funnel)\n"
+        "  3. Run `ngrok http <port>` or `cloudflared tunnel --url http://localhost:<port>` "
+        "and export IICP_TUNNEL_URL=<the https URL>\n"
         "See iicp.network/docs/nat-aware-adapter-setup.md for the details."
     )
     return profile
+
+
+# ── External tunnel auto-detect ──────────────────────────────────────────────
+
+
+async def _detect_external_tunnel(bind_port: int, timeout_s: float = 3.0) -> str | None:
+    """Detect a running external tunnel daemon and return its public HTTPS URL.
+
+    Checks in order:
+      1. IICP_TUNNEL_URL / TUNNEL_URL / CLOUDFLARE_TUNNEL_URL env vars —
+         operator-set; covers cloudflared Quick Tunnels and any custom setup.
+      2. ngrok — queries the local REST API at http://127.0.0.1:4040/api/tunnels.
+      3. tailscale funnel — parses `tailscale serve status` CLI output.
+    """
+    import os as _os
+
+    for env_var in ("IICP_TUNNEL_URL", "TUNNEL_URL", "CLOUDFLARE_TUNNEL_URL"):
+        url = _os.environ.get(env_var, "")
+        if url.startswith("https://"):
+            return url
+
+    url = await _detect_ngrok_tunnel(bind_port, timeout_s=timeout_s)
+    if url:
+        return url
+
+    url = await _detect_tailscale_funnel(bind_port, timeout_s=timeout_s)
+    return url
+
+
+async def _detect_ngrok_tunnel(bind_port: int, timeout_s: float = 3.0) -> str | None:
+    """Query the ngrok local API at http://127.0.0.1:4040/api/tunnels.
+
+    Returns the first HTTPS public_url whose forwarding address contains
+    :{bind_port}. Falls back to the first HTTPS tunnel when no port match.
+    """
+    try:
+        import httpx
+    except ImportError:
+        return None
+
+    try:
+        async with httpx.AsyncClient(timeout=min(timeout_s, 2.0)) as client:
+            resp = await client.get("http://127.0.0.1:4040/api/tunnels")
+        if resp.status_code != 200:
+            return None
+
+        tunnels = resp.json().get("tunnels", [])
+        first_https: str | None = None
+        for tunnel in tunnels:
+            pub_url = tunnel.get("public_url", "")
+            if not pub_url.startswith("https://"):
+                continue
+            cfg_addr: str = tunnel.get("config", {}).get("addr", "")
+            if f":{bind_port}" in cfg_addr:
+                return pub_url
+            if first_https is None:
+                first_https = pub_url
+        return first_https
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def _detect_tailscale_funnel(bind_port: int, timeout_s: float = 3.0) -> str | None:
+    """Detect a tailscale funnel serving bind_port via `tailscale serve status`.
+
+    Works with tailscale ≥ 1.42.0 (the serve/funnel redesign).
+    """
+    import json as _json
+
+    try:
+        # Step 1 — get the MagicDNS hostname for this node.
+        st_proc = await asyncio.create_subprocess_exec(
+            "tailscale", "status", "--json",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            st_out, _ = await asyncio.wait_for(st_proc.communicate(), timeout=timeout_s)
+        except asyncio.TimeoutError:
+            st_proc.kill()
+            return None
+        status = _json.loads(st_out.decode())
+        dns_name = status.get("Self", {}).get("DNSName", "").rstrip(".")
+        if not dns_name:
+            return None
+
+        # Step 2 — check if a funnel is configured for bind_port.
+        sv_proc = await asyncio.create_subprocess_exec(
+            "tailscale", "serve", "status", "--json",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            sv_out, _ = await asyncio.wait_for(sv_proc.communicate(), timeout=timeout_s)
+        except asyncio.TimeoutError:
+            sv_proc.kill()
+            return None
+        serve = _json.loads(sv_out.decode())
+        # JSON shape: {"TCP": {"localhost:PORT": {"TCPForward": ..., "Funnel": true}}}
+        for src, cfg in serve.get("TCP", {}).items():
+            if cfg.get("Funnel") and f":{bind_port}" in src:
+                port_sfx = f":{bind_port}" if bind_port not in (80, 443) else ""
+                return f"https://{dns_name}{port_sfx}"
+    except Exception:  # noqa: BLE001
+        pass
+    return None
 
 
 # ── UPnP helpers ─────────────────────────────────────────────────────────────
