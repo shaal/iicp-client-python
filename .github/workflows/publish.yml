@@ -76,8 +76,12 @@ jobs:
         run: pip install build --quiet
       - name: Build sdist and wheel
         run: python -m build
-      - name: Publish to PyPI (trusted publishing)
+      - name: Publish to PyPI (API token)
         uses: pypa/gh-action-pypi-publish@release/v1
-        # Falls back to API token if OIDC trusted publishing is not configured:
-        # with:
-        #   password: ${{ secrets.PYPI_API_TOKEN }}
+        # API token auth — OIDC trusted publishing is not yet configured on
+        # the PyPI project side (would need a trusted-publisher rule matching
+        # workflow_ref=publish.yml@refs/tags/v0.5.x + environment=pypi).
+        # When the trusted publisher is configured, remove the `with:` block
+        # and uncomment `id-token: write` to fall back to OIDC.
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
