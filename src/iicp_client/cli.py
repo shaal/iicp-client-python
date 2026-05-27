@@ -23,13 +23,25 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import sys
+import urllib.request
 import uuid
 
 from iicp_client import IicpNode, NodeConfig
 from iicp_client.backends import openai_compat_handler
+from iicp_client.identity import (
+    NodeIdentity,
+    OperatorIdentity,
+    config_dir,
+    list_nodes,
+    load_node,
+    load_operator,
+    save_node,
+    save_operator,
+)
 
 logger = logging.getLogger("iicp-node")
 
@@ -45,7 +57,22 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    sub.add_parser(
+        "init",
+        help="Interactive wizard — set up operator identity + first node config.",
+    )
+    sub.add_parser(
+        "list",
+        help="List node configs saved under ~/.iicp/nodes/.",
+    )
+
     serve = sub.add_parser("serve", help="Register and serve a node.")
+    serve.add_argument(
+        "--node",
+        default=_env("IICP_NODE_NAME"),
+        help="Load config from ~/.iicp/nodes/<NAME>.json (created by `iicp-node init`). "
+        "Other flags override file values when both are set.",
+    )
     serve.add_argument(
         "--backend-url",
         default=_env("IICP_BACKEND_URL"),
@@ -133,10 +160,41 @@ async def _serve(args: argparse.Namespace) -> int:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
 
+    # If --node <name> points at a saved config, fill any unset CLI flags
+    # from the file. Explicit flags still win — operators iterate by passing
+    # `--model phi3:mini` while keeping the rest from disk.
+    saved: NodeIdentity | None = None
+    if getattr(args, "node", None):
+        saved = load_node(args.node)
+        if saved is None:
+            sys.stderr.write(
+                f"ERROR: no saved config at ~/.iicp/nodes/{args.node}.json. "
+                "Run `iicp-node init` first.\n"
+            )
+            return 2
+        args.backend_url = args.backend_url or saved.backend_url
+        args.model = args.model or saved.model
+        args.public_endpoint = args.public_endpoint or saved.public_endpoint
+        args.directory_url = args.directory_url or saved.directory_url
+        args.region = args.region or saved.region
+        args.intent = args.intent or saved.intent
+        args.node_id = args.node_id or saved.node_id
+        if args.max_concurrent == 4:
+            args.max_concurrent = saved.max_concurrent
+        if args.port == 8020:
+            args.port = saved.port
+        if args.host == "0.0.0.0":
+            args.host = saved.host
+        if not args.auto_detect_nat and saved.auto_detect_nat:
+            args.auto_detect_nat = True
+        if not args.external_ip_probe_url and saved.external_ip_probe_url:
+            args.external_ip_probe_url = saved.external_ip_probe_url
+
     if not args.backend_url or not args.model:
         sys.stderr.write(
             "ERROR: --backend-url and --model are required "
-            "(or set IICP_BACKEND_URL and IICP_BACKEND_MODEL).\n"
+            "(or set IICP_BACKEND_URL and IICP_BACKEND_MODEL, "
+            "or load via `--node <name>` after `iicp-node init`).\n"
         )
         return 2
 
@@ -211,11 +269,132 @@ async def _serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _prompt(question: str, default: str = "") -> str:
+    """Plain stdin prompt with default. Returns the user's answer (or default)."""
+    suffix = f" [{default}]" if default else ""
+    sys.stdout.write(f"{question}{suffix}: ")
+    sys.stdout.flush()
+    line = sys.stdin.readline().strip()
+    return line or default
+
+
+def _ollama_models(backend_url: str) -> list[str]:
+    """Best-effort: list models from a local Ollama. Empty list on any error."""
+    try:
+        with urllib.request.urlopen(
+            backend_url.rstrip("/") + "/api/tags", timeout=2
+        ) as resp:
+            data = json.loads(resp.read().decode())
+            return sorted({m["name"] for m in data.get("models", [])})
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _cmd_init(args: argparse.Namespace) -> int:
+    """Interactive setup wizard. Creates operator identity if absent,
+    creates a new node config under ~/.iicp/nodes/<name>.json."""
+    print(f"IICP node setup — config dir: {config_dir()}\n")
+
+    # 1) Operator identity ──────────────────────────────────────────────────
+    op = load_operator()
+    if op is None:
+        print("No operator identity yet. Creating one — credits earned by every")
+        print("node you run will accumulate to this operator_id.\n")
+        display = _prompt("Display name", os.environ.get("USER", "operator"))
+        contact = _prompt("Contact (email, leave blank for none)", "")
+        op = OperatorIdentity.generate(display_name=display, contact=contact)
+        save_operator(op)
+        print(f"  ✓ created {op.operator_id}\n")
+    else:
+        print(f"Existing operator: {op.operator_id} ({op.display_name})\n")
+
+    # 2) Backend (Ollama / vLLM / LM Studio) ───────────────────────────────
+    backend_url = _prompt(
+        "Backend URL (OpenAI-compatible)", "http://localhost:11434"
+    )
+    models = _ollama_models(backend_url)
+    if models:
+        print(f"  Detected models at {backend_url}: {', '.join(models[:6])}")
+        model_default = models[0]
+    else:
+        model_default = "qwen2.5:0.5b"
+    model = _prompt("Model to advertise", model_default)
+
+    # 3) Node-specific ──────────────────────────────────────────────────────
+    name_default = model.replace(":", "-").replace(".", "-").lower()
+    name = _prompt("Local node name (used as ~/.iicp/nodes/<NAME>.json)", name_default)
+    intent = _prompt("Intent URN", "urn:iicp:intent:llm:chat:v1")
+    region = _prompt("Region tag", "eu-central")
+    directory_url = _prompt("Directory URL", "https://iicp.network/api")
+    port_str = _prompt("Local HTTP port", "8020")
+    port = int(port_str)
+    public_endpoint = _prompt(
+        "Public endpoint URL (leave blank if you'll use --auto-detect-nat)",
+        "",
+    )
+    auto_nat = _prompt("Auto-detect NAT via UPnP / external-IP probe? (y/N)", "n")
+    auto_detect_nat = auto_nat.lower().startswith("y")
+    external_probe = ""
+    if auto_detect_nat:
+        external_probe = _prompt(
+            "External-IP probe URL (fallback when UPnP fails)",
+            "https://api.ipify.org",
+        )
+
+    # 4) Persist ───────────────────────────────────────────────────────────
+    try:
+        node = NodeIdentity.generate(
+            operator_id=op.operator_id,
+            name=name,
+            backend_url=backend_url,
+            model=model,
+            intent=intent,
+            region=region,
+            directory_url=directory_url,
+            port=port,
+            public_endpoint=public_endpoint,
+            auto_detect_nat=auto_detect_nat,
+            external_ip_probe_url=external_probe,
+        )
+    except ValueError as exc:
+        sys.stderr.write(f"\nERROR: {exc}\n")
+        return 2
+    saved_to = save_node(node)
+    print()
+    print(f"  ✓ saved {saved_to}")
+    print(f"  ✓ node_id = {node.node_id}")
+    print()
+    print(f"Run: iicp-node serve --node {name}")
+    return 0
+
+
+def _cmd_list(_args: argparse.Namespace) -> int:
+    op = load_operator()
+    if op:
+        print(f"Operator: {op.operator_id} ({op.display_name})\n")
+    nodes = list_nodes()
+    if not nodes:
+        print("No node configs yet. Run `iicp-node init`.")
+        return 0
+    width = max(len(n.name) for n in nodes)
+    print(f"{'NAME'.ljust(width)}  MODEL                BACKEND")
+    print(f"{'-' * width}  -------------------- --------------------------------")
+    for n in nodes:
+        print(
+            f"{n.name.ljust(width)}  {n.model[:20].ljust(20)} {n.backend_url[:48]}"
+        )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.cmd == "serve":
         return asyncio.run(_serve(args))
+    if args.cmd == "init":
+        return _cmd_init(args)
+    if args.cmd == "list":
+        return _cmd_list(args)
     parser.error(f"unknown command: {args.cmd}")
     return 2
 
