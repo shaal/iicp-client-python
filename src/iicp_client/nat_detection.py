@@ -456,7 +456,7 @@ async def _detect_tailscale_funnel(bind_port: int, timeout_s: float = 3.0) -> st
         )
         try:
             st_out, _ = await asyncio.wait_for(st_proc.communicate(), timeout=timeout_s)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             st_proc.kill()
             return None
         status = _json.loads(st_out.decode())
@@ -472,7 +472,7 @@ async def _detect_tailscale_funnel(bind_port: int, timeout_s: float = 3.0) -> st
         )
         try:
             sv_out, _ = await asyncio.wait_for(sv_proc.communicate(), timeout=timeout_s)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             sv_proc.kill()
             return None
         serve = _json.loads(sv_out.decode())
