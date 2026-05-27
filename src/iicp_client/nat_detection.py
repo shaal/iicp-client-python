@@ -164,13 +164,21 @@ async def detect_nat(
             profile.detection_log.append(
                 f"tier-0: operator-configured public_endpoint={operator_public_endpoint!r}"
             )
-            return NatProfile(
+            t0 = NatProfile(
                 tier=0,
                 transport_method="direct",
                 public_endpoint=operator_public_endpoint,
                 internal_endpoint=profile.internal_endpoint,
                 detection_log=profile.detection_log,
+                ipv6=profile.ipv6,
             )
+            # #343 / ADR-043 §5 — even when the operator gives us an explicit
+            # endpoint, if it's IPv6 we should still try to open an inbound
+            # firewall pinhole via UPnP. Previously the tier-0 path returned
+            # immediately, leaving the router firewall closed and the directory
+            # unable to dial back → public_reachable=false.
+            _maybe_open_v6_pinhole_for_endpoint(t0, bind_port)
+            return t0
         profile.detection_log.append(
             f"tier-0: operator-configured public_endpoint={operator_public_endpoint!r} "
             f"non-routable — falling through to tier-1 UPnP detection."
@@ -246,16 +254,25 @@ async def detect_nat(
             )
             return profile  # tier 4 — unreachable in practice
 
-        public_url = f"http://{upnp.external_ip}:{bind_port}"
+        # ADR-041 §3 — the URLs we advertise must use the EXTERNAL ports the
+        # IGD actually assigned. With AddAnyPortMapping fallback, the assigned
+        # external can differ from our internal bind_port / transport_port
+        # (e.g. another LAN host already owns external 9484).
+        ext_bind = upnp.port_mapping.get(bind_port, bind_port)
+        public_url = f"http://{upnp.external_ip}:{ext_bind}"
         transport_url: str | None = None
         if transport_port and transport_port in upnp.mapped_ports and transport_port != bind_port:
-            transport_url = f"iicp://{upnp.external_ip}:{transport_port}"
+            ext_transport = upnp.port_mapping.get(transport_port, transport_port)
+            transport_url = f"iicp://{upnp.external_ip}:{ext_transport}"
             profile.detection_log.append(
-                f"tier-1: UPnP mapped {bind_port} → {public_url} AND "
-                f"{transport_port} → {transport_url} (spec v0.7.0 dual-endpoint)"
+                f"tier-1: UPnP mapped {bind_port}→{ext_bind} ({public_url}) AND "
+                f"{transport_port}→{ext_transport} ({transport_url}) "
+                f"(spec v0.7.0 dual-endpoint; AddAnyPortMapping used if ext≠internal)"
             )
         else:
-            profile.detection_log.append(f"tier-1: UPnP mapped {bind_port} → {public_url}")
+            profile.detection_log.append(
+                f"tier-1: UPnP mapped {bind_port}→{ext_bind} ({public_url})"
+            )
 
         return NatProfile(
             tier=1,
@@ -335,8 +352,15 @@ async def detect_nat(
 class _UpnpResult:
     success: bool
     external_ip: str | None = None
-    external_port: int | None = None  # primary mapped port (first in the list)
-    mapped_ports: list[int] = field(default_factory=list)  # all successfully mapped ports
+    # Primary external port — what the IGD actually assigned for the first
+    # internal port. May differ from the internal when AddAnyPortMapping was
+    # used as fallback to AddPortMapping.
+    external_port: int | None = None
+    # All internal ports that we successfully mapped to SOME external port.
+    mapped_ports: list[int] = field(default_factory=list)
+    # internal_port → assigned_external_port (often identity, but not when
+    # AddAnyPortMapping picks a non-canonical port due to conflict).
+    port_mapping: dict[int, int] = field(default_factory=dict)
     igd_device: str | None = None
     error: str | None = None
 
@@ -401,57 +425,108 @@ def _upnp_mapping_blocking(internal_ports: list[int], lease_seconds: int) -> _Up
     # isn't on its LAN (UPnP error 606 / 718).
     local_ip = _detect_local_ip_matching_igd(igd) or _detect_local_ip_for_default_gateway()
 
-    try:
-        wan_svc.AddPortMapping(
-            NewRemoteHost="",
-            NewExternalPort=primary_port,
-            NewProtocol="TCP",
-            NewInternalPort=primary_port,
-            NewInternalClient=local_ip,
-            NewEnabled="1",
-            NewPortMappingDescription=f"iicp-client (ADR-041 tier-1) {primary_port}",
-            NewLeaseDuration=lease_seconds,
-        )
-    except Exception as exc:  # noqa: BLE001
+    # Strategy: 1:1 AddPortMapping first (canonical port preserved); on conflict
+    # fall back to AddAnyPortMapping (IGDv2) which lets the IGD pick a free
+    # external port. We track the assigned port so the SDK can advertise the
+    # actual iicp:// URL the directory should dial.
+    assigned_primary = _map_one_v4_port(wan_svc, primary_port, local_ip, lease_seconds)
+    if assigned_primary is None:
         return _UpnpResult(
             success=False,
             external_ip=ext_ip,
             error=(
-                f"AddPortMapping failed for primary port {primary_port}: {exc} "
-                f"(NewInternalClient={local_ip})"
+                f"AddPortMapping + AddAnyPortMapping both failed for "
+                f"primary port {primary_port} (NewInternalClient={local_ip})"
             ),
             igd_device=str(igd),
         )
 
+    # `mapped` tracks INTERNAL ports that succeeded (callers check
+    # `internal in mapped` to decide whether to advertise that endpoint).
+    # `port_map_external` carries the internal→external mapping when the
+    # IGD assigned a non-canonical external (AddAnyPortMapping fallback).
     mapped: list[int] = [primary_port]
+    port_map_external: dict[int, int] = {primary_port: assigned_primary}
     for extra in internal_ports[1:]:
-        try:
-            wan_svc.AddPortMapping(
-                NewRemoteHost="",
-                NewExternalPort=extra,
-                NewProtocol="TCP",
-                NewInternalPort=extra,
-                NewInternalClient=local_ip,
-                NewEnabled="1",
-                NewPortMappingDescription=f"iicp-client (ADR-041 tier-1) {extra}",
-                NewLeaseDuration=lease_seconds,
-            )
+        assigned = _map_one_v4_port(wan_svc, extra, local_ip, lease_seconds)
+        if assigned is not None:
             mapped.append(extra)
-        except Exception as exc:  # noqa: BLE001
+            port_map_external[extra] = assigned
+        else:
             logger.warning(
-                "UPnP: failed to map additional port %d (primary %d already mapped): %s",
+                "UPnP: failed to map additional port %d (primary %d → %d already mapped)",
                 extra,
                 primary_port,
-                exc,
+                assigned_primary,
             )
 
     return _UpnpResult(
         success=True,
         external_ip=ext_ip,
-        external_port=primary_port,
+        external_port=assigned_primary,
         mapped_ports=mapped,
+        port_mapping=port_map_external,
         igd_device=str(igd),
     )
+
+
+def _map_one_v4_port(wan_svc, internal_port: int, local_ip: str, lease_seconds: int) -> int | None:
+    """Map a single port via UPnP v4, returning the assigned EXTERNAL port.
+
+    Tries 1:1 AddPortMapping first (preserves canonical ports like 9484).
+    On `ConflictInMappingEntry` (the IGD already has a mapping for that
+    external port from another host), falls back to AddAnyPortMapping
+    (IGDv2 §2.5.13 — added precisely for this race). Returns None when
+    both fail.
+    """
+    desc = f"iicp-client (ADR-041 tier-1) {internal_port}"
+    try:
+        wan_svc.AddPortMapping(
+            NewRemoteHost="",
+            NewExternalPort=internal_port,
+            NewProtocol="TCP",
+            NewInternalPort=internal_port,
+            NewInternalClient=local_ip,
+            NewEnabled="1",
+            NewPortMappingDescription=desc,
+            NewLeaseDuration=lease_seconds,
+        )
+        return internal_port
+    except Exception as exc:  # noqa: BLE001
+        # 1:1 conflict (most common cause: another host already has this
+        # external port mapped). Try AddAnyPortMapping; the IGD picks a
+        # free external port in its dynamic pool.
+        logger.info(
+            "UPnP: AddPortMapping %d failed (%s); retrying via AddAnyPortMapping",
+            internal_port,
+            exc,
+        )
+    try:
+        result = wan_svc.AddAnyPortMapping(
+            NewRemoteHost="",
+            NewExternalPort=internal_port,
+            NewProtocol="TCP",
+            NewInternalPort=internal_port,
+            NewInternalClient=local_ip,
+            NewEnabled="1",
+            NewPortMappingDescription=desc,
+            NewLeaseDuration=lease_seconds,
+        )
+        assigned = int(result.get("NewReservedPort", 0))
+        if assigned > 0:
+            logger.info(
+                "UPnP: AddAnyPortMapping assigned external port %d for internal %d",
+                assigned,
+                internal_port,
+            )
+            return assigned
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "UPnP: AddAnyPortMapping failed for internal %d: %s",
+            internal_port,
+            exc,
+        )
+    return None
 
 
 def _detect_local_ip_matching_igd(igd) -> str | None:
@@ -731,6 +806,174 @@ def _is_privacy_v6(addr: str) -> bool:
     iface_id = int(a) & ((1 << 64) - 1)
     eui64_marker = (iface_id >> 24) & 0xFFFF
     return eui64_marker != 0xFFFE
+
+
+def _local_global_ipv6_candidates() -> list[str]:
+    """Enumerate this host's global IPv6 addresses (2000::/3 GUA).
+
+    Returned ranked from MOST-likely-to-be-pinhole-accepted to least, based on
+    AVM/FRITZ!Box behaviour observed 2026-05-27: AddPinhole only authorises
+    addresses currently in the router's neighbor cache, which is the
+    **current temporary** (RFC 4941 privacy) address — NOT the "secured"
+    RFC 7217 stable-private one, NOT deprecated temporaries.
+
+    Heuristic on macOS (the only platform we have a confirmed FRITZ test
+    against): prefer addresses listed first whose flags do NOT include
+    "deprecated" or "secured". On Linux we don't have that flag visibility
+    via ifaddr, so fall back to "first GUA per interface".
+    """
+    out: list[str] = []
+    try:
+        import sys
+
+        if sys.platform == "darwin":
+            import subprocess
+
+            r = subprocess.run(
+                ["ifconfig"], capture_output=True, text=True, check=False
+            )
+            iface_name: str | None = None
+            current_temp: list[str] = []
+            secured: list[str] = []
+            deprecated_or_other: list[str] = []
+            for line in r.stdout.splitlines():
+                if line and line[0].isalpha():
+                    iface_name = line.split(":")[0]
+                    continue
+                line = line.strip()
+                if not line.startswith("inet6 "):
+                    continue
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                addr = parts[1].split("%")[0]
+                if not addr.startswith(("2", "3")):
+                    continue  # not GUA
+                flags = " ".join(parts[2:]).lower()
+                if "deprecated" in flags:
+                    deprecated_or_other.append(addr)
+                elif "secured" in flags:
+                    secured.append(addr)
+                elif "temporary" in flags or "autoconf" in flags:
+                    current_temp.append(addr)
+                else:
+                    deprecated_or_other.append(addr)
+            out = current_temp + secured + deprecated_or_other
+        else:
+            # Linux / other: best-effort via ifaddr (an iicp-client[nat] dep).
+            try:
+                import ifaddr  # type: ignore[import-untyped]
+
+                for ad in ifaddr.get_adapters():
+                    for ip in ad.ips:
+                        s = ip.ip[0] if isinstance(ip.ip, tuple) else ip.ip
+                        if isinstance(s, str) and s.startswith(("2", "3")):
+                            out.append(s)
+            except ImportError:
+                pass
+    except Exception:  # noqa: BLE001
+        pass
+    # Dedupe preserving order
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for a in out:
+        if a not in seen:
+            seen.add(a)
+            deduped.append(a)
+    return deduped
+
+
+def _maybe_open_v6_pinhole_for_endpoint(profile: NatProfile, bind_port: int) -> None:
+    """If the chosen public_endpoint is IPv6, try to open an inbound pinhole.
+
+    Mutates `profile.ipv6` + `profile.detection_log` in place. Idempotent and
+    safe to call multiple times (the SDK falls through to it from tier-0 AND
+    tier-1 paths). The operator-facing payoff: a node advertising
+    `http://[2a0a:...]:8020` actually becomes reachable from the directory's
+    dial-back probe instead of sitting silently in `internal_nodes`.
+
+    Behaviour 2026-05-27 (after FRITZ!Box AddPinhole investigation): if the
+    initial v6 in the endpoint URL returns UPnP error 606, iterate through
+    the host's other GUAs (ranked by [_local_global_ipv6_candidates]) and
+    retry — FRITZ only authorises the address currently in its neighbor
+    cache, which on macOS is the "current temporary" RFC 4941 address, NOT
+    the "secured" RFC 7217 one the OS often enumerates first. If a
+    different GUA succeeds, the endpoint URL is REWRITTEN on the profile
+    so the directory sees the actually-pinhole'd address.
+    """
+    endpoint = profile.public_endpoint or ""
+    # Parse [ipv6]:port out of http://[hex:hex::]:8020 — bracketed-form only.
+    import re
+
+    m = re.match(r"https?://\[([0-9a-fA-F:]+)\](?::(\d+))?", endpoint)
+    if not m:
+        return
+    v6_host = m.group(1)
+    port_in_url = int(m.group(2)) if m.group(2) else bind_port
+    scheme = endpoint.split("://", 1)[0]
+    # GUA 2000::/3 only — RFC 4193 (fc00::/7) and link-local (fe80::/10) skip.
+    try:
+        import ipaddress
+
+        addr = ipaddress.IPv6Address(v6_host)
+        if not addr.is_global:
+            profile.detection_log.append(
+                f"v6 pinhole: skip — {v6_host} is not a global IPv6 (GUA 2000::/3 required)"
+            )
+            return
+    except ValueError:
+        return
+
+    # Ranked candidate list: requested address first, then the other GUAs
+    # this host has (most-likely-to-be-accepted first).
+    candidates = [v6_host] + [
+        c for c in _local_global_ipv6_candidates() if c != v6_host
+    ]
+    chosen: str | None = None
+    chosen_result: tuple[int, int, bool] | None = None
+    for cand in candidates:
+        profile.detection_log.append(
+            f"v6 pinhole: attempting AddPinhole for [{cand}]:{port_in_url}"
+        )
+        result = _try_upnp_ipv6_pinhole(cand, port_in_url)
+        if result is not None:
+            chosen = cand
+            chosen_result = result
+            break
+
+    if chosen is None or chosen_result is None:
+        profile.detection_log.append(
+            "v6 pinhole: not opened on any local GUA — if your router is a "
+            "FRITZ!Box, enable 'Internet → Filters → IPv6 → Selbständige "
+            "Portfreigaben durch das Gerät erlauben' (or equivalent on "
+            "other vendors). Error 606 from the IGD = router-side ACL "
+            "block, NOT a SOAP problem."
+        )
+        if profile.ipv6 is None:
+            profile.ipv6 = Ipv6Profile()
+        profile.ipv6.pinhole_active = False
+        return
+
+    uid, lease, allowed = chosen_result
+    profile.detection_log.append(
+        f"v6 pinhole: AddPinhole OK — uid={uid} lease={lease}s on [{chosen}]"
+    )
+    if chosen != v6_host:
+        # Rewrite the public_endpoint so the directory advertises the v6
+        # that's ACTUALLY pinhole'd. Operator's original URL pointed at a
+        # router-rejected address (typical macOS RFC 7217 path).
+        new_endpoint = f"{scheme}://[{chosen}]:{port_in_url}"
+        profile.detection_log.append(
+            f"v6 pinhole: rewriting public_endpoint {endpoint} → {new_endpoint} "
+            f"(original v6 rejected by IGD, pinhole opened on different local GUA)"
+        )
+        profile.public_endpoint = new_endpoint
+    if profile.ipv6 is None:
+        profile.ipv6 = Ipv6Profile()
+    profile.ipv6.pinhole_active = True
+    profile.ipv6.pinhole_unique_id = uid
+    profile.ipv6.pinhole_lease_seconds = lease
+    profile.ipv6.pinhole_inbound_allowed = allowed
 
 
 def _try_upnp_ipv6_pinhole(
