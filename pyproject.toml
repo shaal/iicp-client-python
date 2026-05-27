@@ -53,6 +53,7 @@ nat = [
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
+    "pytest-timeout>=2.3",
     "respx>=0.21",
     "ruff>=0.8",
     "prometheus-client>=0.20",
@@ -64,6 +65,12 @@ packages = ["src/iicp_client"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Hard per-test timeout so a hung test fails fast in CI with a specific
+# traceback instead of consuming the whole runner. Locally the full suite
+# runs in <3s; 30s is generous for the slowest fixture (HTTP server boot
+# + shutdown).
+timeout = 30
+timeout_method = "thread"
 
 [tool.ruff]
 line-length = 100
