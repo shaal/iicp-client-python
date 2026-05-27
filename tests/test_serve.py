@@ -5,6 +5,7 @@ then shuts it down — no mocking of the HTTP server itself.
 
 Conformance: SDK-03 (node serve), SDK-05 (error codes), SDK-06 (traceparent).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -21,6 +22,7 @@ import pytest
 from iicp_client import IicpNode, NodeConfig
 
 # ── helpers ─────────────────────────────────────────────────────────────────
+
 
 def _free_port() -> int:
     with socket.socket() as s:
@@ -116,6 +118,7 @@ def srv():
 
 # ── GET /iicp/health ─────────────────────────────────────────────────────────
 
+
 class TestHealth:
     def test_health_returns_200(self, srv: _ServerHandle):
         status, _ = srv.get("/iicp/health")
@@ -142,6 +145,7 @@ class TestHealth:
 
 # ── GET /metrics ─────────────────────────────────────────────────────────────
 
+
 class TestMetrics:
     def test_metrics_endpoint_responds(self, srv: _ServerHandle):
         status, _ = srv.get("/metrics")
@@ -149,6 +153,7 @@ class TestMetrics:
 
 
 # ── POST /v1/task ─────────────────────────────────────────────────────────────
+
 
 class TestTask:
     def test_task_returns_200(self, srv: _ServerHandle):
@@ -167,6 +172,7 @@ class TestTask:
 
 
 # ── Concurrency gate (IICP-E021) ─────────────────────────────────────────────
+
 
 class TestConcurrencyGate:
     def test_429_always_reject(self):
@@ -256,6 +262,7 @@ class TestConcurrencyGate:
 
 # ── Nonce replay (IICP-E011) ─────────────────────────────────────────────────
 
+
 class TestNonceReplay:
     def test_duplicate_nonce_returns_409(self, srv: _ServerHandle):
         nonce = "nonce-unique-xyz-abc"
@@ -283,6 +290,7 @@ class TestNonceReplay:
 
 # ── W3C traceparent propagation ───────────────────────────────────────────────
 
+
 class TestTraceparent:
     def test_traceparent_injected_into_handler(self):
         received: list[dict] = []
@@ -304,9 +312,7 @@ class TestTraceparent:
             daemon=True,
             target=lambda: (
                 asyncio.set_event_loop(h._loop),
-                h._loop.run_until_complete(
-                    h._node.serve(_capture, host="127.0.0.1", port=h.port)
-                ),
+                h._loop.run_until_complete(h._node.serve(_capture, host="127.0.0.1", port=h.port)),
             ),
         )
         h._thread.start()

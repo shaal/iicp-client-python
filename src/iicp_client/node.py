@@ -13,6 +13,7 @@ Endpoints served by ``IicpNode.serve()``:
 | GET     | /metrics       | Prometheus text (503 if client absent)       |
 +---------+----------------+----------------------------------------------+
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -241,11 +242,13 @@ class IicpNode:
         payload: dict[str, Any] = {
             "endpoint": self._cfg.endpoint,
             "region": self._cfg.region or "eu-central",
-            "capabilities": [{
-                "intent": self._cfg.intent,
-                "models": models,
-                "max_tokens": self._cfg.max_tokens,
-            }],
+            "capabilities": [
+                {
+                    "intent": self._cfg.intent,
+                    "models": models,
+                    "max_tokens": self._cfg.max_tokens,
+                }
+            ],
             "limits": {
                 "max_concurrent": self._cfg.max_concurrent,
                 "tokens_per_min": self._cfg.tokens_per_min,
@@ -269,6 +272,7 @@ class IicpNode:
         # S.12 §2.1 — CIP-D1 policy block. Use the per-config policy if set,
         # otherwise fall back to the module-level cip_policy.get_policy().
         from iicp_client.cip_policy import CooperativeInferencePolicy, get_policy
+
         policy_obj = self._cfg.cip_policy
         if policy_obj is None:
             policy_obj = get_policy()
@@ -281,6 +285,7 @@ class IicpNode:
         # sign_declarations=True AND a HMAC key is present, sign the body so
         # the directory marks pricing.attested=true in /v1/discover.
         from iicp_client.pricing import PricingConfig, build_pricing_block
+
         if isinstance(self._cfg.pricing, PricingConfig):
             payload["pricing"] = build_pricing_block(
                 self._cfg.pricing, hmac_key=self._node_hmac_key
@@ -457,9 +462,7 @@ class IicpNode:
                 t0 = time.monotonic()
                 try:
                     length = int(self.headers.get("Content-Length", 0))
-                    body: dict[str, Any] = (
-                        json.loads(self.rfile.read(length)) if length else {}
-                    )
+                    body: dict[str, Any] = json.loads(self.rfile.read(length)) if length else {}
 
                     # Nonce replay — IICP-E011
                     if not node._check_nonce(body.get("nonce")):
@@ -487,14 +490,12 @@ class IicpNode:
                     )
 
                     try:
-                        result = asyncio.run_coroutine_threadsafe(
-                            handler(body), loop
-                        ).result(timeout=60)
+                        result = asyncio.run_coroutine_threadsafe(handler(body), loop).result(
+                            timeout=60
+                        )
                         latency_ms = (time.monotonic() - t0) * 1000
                         usage = result.get("usage") or {}
-                        tokens = (
-                            usage.get("total_tokens", 0) if isinstance(usage, dict) else 0
-                        )
+                        tokens = usage.get("total_tokens", 0) if isinstance(usage, dict) else 0
                         node._metrics.observe("completed", intent, qos, latency_ms, tokens)
                         resp_body = json.dumps(
                             {

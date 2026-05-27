@@ -1,4 +1,5 @@
 """Internal HTTP helpers — TLS context, timeout normalization."""
+
 from __future__ import annotations
 
 import secrets
@@ -44,9 +45,7 @@ async def get_json(
     timeout = timeout_ms / 1000.0
     headers = {"traceparent": traceparent or _traceparent()}
     try:
-        async with httpx.AsyncClient(
-            timeout=timeout, verify=_tls_context(tls_verify)
-        ) as client:
+        async with httpx.AsyncClient(timeout=timeout, verify=_tls_context(tls_verify)) as client:
             resp = await client.get(url, params=params, headers=headers)
     except httpx.TimeoutException:
         raise IicpError(
@@ -81,9 +80,7 @@ async def post_json(
     headers = {"traceparent": traceparent or _traceparent()}
     t0 = time.monotonic()
     try:
-        async with httpx.AsyncClient(
-            timeout=timeout, verify=_tls_context(tls_verify)
-        ) as client:
+        async with httpx.AsyncClient(timeout=timeout, verify=_tls_context(tls_verify)) as client:
             resp = await client.post(url, json=body, headers=headers)
     except httpx.TimeoutException:
         raise IicpError(

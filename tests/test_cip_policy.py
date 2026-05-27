@@ -1,11 +1,11 @@
 """Unit tests for cip_policy — S.12 §2.2 worker-role gate."""
+
 from __future__ import annotations
 
 import asyncio
 import json
 
 import httpx
-import pytest
 import respx
 
 from iicp_client import IicpNode, NodeConfig
@@ -15,8 +15,8 @@ from iicp_client.cip_policy import (
     get_policy,
 )
 
-
 # ── Gate predicates ───────────────────────────────────────────────────────
+
 
 class TestGatePredicates:
     def test_default_is_all_off(self):
@@ -52,6 +52,7 @@ class TestGatePredicates:
 
 # ── Capacity gate (S.12 §2.2) ─────────────────────────────────────────────
 
+
 class TestCapacityGate:
     def test_max_concurrent_remote_lower_bound_enforced(self):
         p = CooperativeInferencePolicy(max_concurrent_remote=0)
@@ -74,6 +75,7 @@ class TestCapacityGate:
 
 # ── Register-payload integration ──────────────────────────────────────────
 
+
 class TestRegisterPayloadIntegration:
     @respx.mock
     def test_cip_disabled_emits_no_policy_block(self):
@@ -81,14 +83,16 @@ class TestRegisterPayloadIntegration:
         route = respx.post("https://iicp.test/v1/register").mock(
             return_value=httpx.Response(201, json={"node_token": "tok", "node_id": "n"})
         )
-        node = IicpNode(NodeConfig(
-            node_id="n",
-            endpoint="https://provider.example:8080",
-            intent="urn:iicp:intent:llm:chat:v1",
-            model="q",
-            directory_url="https://iicp.test",
-            cip_policy=CooperativeInferencePolicy(),  # default OFF
-        ))
+        node = IicpNode(
+            NodeConfig(
+                node_id="n",
+                endpoint="https://provider.example:8080",
+                intent="urn:iicp:intent:llm:chat:v1",
+                model="q",
+                directory_url="https://iicp.test",
+                cip_policy=CooperativeInferencePolicy(),  # default OFF
+            )
+        )
         asyncio.run(node.register())
         body = json.loads(route.calls[0].request.content)
         assert "policy" not in body
@@ -101,14 +105,16 @@ class TestRegisterPayloadIntegration:
         route = respx.post("https://iicp.test/v1/register").mock(
             return_value=httpx.Response(201, json={"node_token": "tok", "node_id": "n"})
         )
-        node = IicpNode(NodeConfig(
-            node_id="n",
-            endpoint="https://provider.example:8080",
-            intent="urn:iicp:intent:llm:chat:v1",
-            model="q",
-            directory_url="https://iicp.test",
-            cip_policy=CooperativeInferencePolicy(enabled=True, allow_worker=True),
-        ))
+        node = IicpNode(
+            NodeConfig(
+                node_id="n",
+                endpoint="https://provider.example:8080",
+                intent="urn:iicp:intent:llm:chat:v1",
+                model="q",
+                directory_url="https://iicp.test",
+                cip_policy=CooperativeInferencePolicy(enabled=True, allow_worker=True),
+            )
+        )
         asyncio.run(node.register())
         body = json.loads(route.calls[0].request.content)
         assert body["policy"]["allow_remote_inference"] is True
@@ -123,14 +129,16 @@ class TestRegisterPayloadIntegration:
             route = respx.post("https://iicp.test/v1/register").mock(
                 return_value=httpx.Response(201, json={"node_token": "tok", "node_id": "n"})
             )
-            node = IicpNode(NodeConfig(
-                node_id="n",
-                endpoint="https://provider.example:8080",
-                intent="urn:iicp:intent:llm:chat:v1",
-                model="q",
-                directory_url="https://iicp.test",
-                # cip_policy not set → falls back to module-level
-            ))
+            node = IicpNode(
+                NodeConfig(
+                    node_id="n",
+                    endpoint="https://provider.example:8080",
+                    intent="urn:iicp:intent:llm:chat:v1",
+                    model="q",
+                    directory_url="https://iicp.test",
+                    # cip_policy not set → falls back to module-level
+                )
+            )
             asyncio.run(node.register())
             body = json.loads(route.calls[0].request.content)
             assert body.get("policy", {}).get("allow_remote_inference") is True
@@ -141,6 +149,7 @@ class TestRegisterPayloadIntegration:
 
 
 # ── Module-level configuration ─────────────────────────────────────────────
+
 
 class TestModuleLevelPolicy:
     def test_get_policy_returns_default_when_unconfigured(self):

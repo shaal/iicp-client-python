@@ -1,19 +1,23 @@
 """iicp-client — Official Python client SDK for the IICP protocol."""
 
-from iicp_client.client import IicpClient
-from iicp_client.errors import IicpError
 from iicp_client.backends import openai_compat_handler
 from iicp_client.cip_policy import (
     CooperativeInferencePolicy,
+)
+from iicp_client.cip_policy import (
     configure_policy as configure_cip_policy,
+)
+from iicp_client.cip_policy import (
     get_policy as get_cip_policy,
 )
+from iicp_client.client import IicpClient
 from iicp_client.concurrency import CapacityExceededError, ConcurrencyGate
 from iicp_client.conformance import ConformanceReport, ProbeResult, run_conformance_checks
+from iicp_client.errors import IicpError
 from iicp_client.iicp_tcp import IicpTcpClient, IicpTcpClientError, IicpTcpServer, MsgType
 from iicp_client.nat_detection import NatProfile, detect_nat
-from iicp_client.pricing import PricingConfig, build_pricing_block, sign_body, verify_signature
 from iicp_client.node import IicpNode, NodeConfig
+from iicp_client.pricing import PricingConfig, build_pricing_block, sign_body, verify_signature
 from iicp_client.types import (
     ChatMessage,
     ChatOptions,

@@ -35,6 +35,7 @@ Two operator-facing diagnostic improvements over the original adapter port:
 `upnpclient` and `ifaddr` are optional deps installed via the `[nat]` extra.
 The module gracefully degrades to tier 4 when they're absent.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -43,12 +44,12 @@ import logging
 import re
 import socket
 from dataclasses import dataclass, field
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 
 # ── Public NatProfile ────────────────────────────────────────────────────────
+
 
 @dataclass
 class NatProfile:
@@ -59,11 +60,13 @@ class NatProfile:
     """
 
     tier: int  # 0..4 per ADR-041
-    transport_method: str  # 'direct' | 'upnp_mapped' | 'stun_hole_punch' | 'turn_relay' | 'external_tunnel' | 'unreachable'
-    public_endpoint: Optional[str] = None  # HTTP control plane URL (`http://host:port`)
-    transport_endpoint: Optional[str] = None  # spec v0.7.0 native IICP URL (`iicp://host:9484`)
-    internal_endpoint: Optional[str] = None
-    operator_guidance: Optional[str] = None
+    # ADR-041 transport_method: 'direct' / 'upnp_mapped' / 'stun_hole_punch' /
+    # 'turn_relay' / 'external_tunnel' / 'unreachable'
+    transport_method: str
+    public_endpoint: str | None = None  # HTTP control plane URL (`http://host:port`)
+    transport_endpoint: str | None = None  # spec v0.7.0 native IICP URL (`iicp://host:9484`)
+    internal_endpoint: str | None = None
+    operator_guidance: str | None = None
     detection_log: list[str] = field(default_factory=list)
 
     def is_reachable(self) -> bool:
@@ -72,15 +75,16 @@ class NatProfile:
 
 # ── Public entry point ───────────────────────────────────────────────────────
 
+
 async def detect_nat(
     bind_host: str,
     bind_port: int,
-    operator_public_endpoint: Optional[str] = None,
+    operator_public_endpoint: str | None = None,
     *,
     upnp_lease_seconds: int = 3600,
     timeout_s: float = 5.0,
-    external_ip_probe_url: Optional[str] = None,
-    transport_port: Optional[int] = None,
+    external_ip_probe_url: str | None = None,
+    transport_port: int | None = None,
 ) -> NatProfile:
     """Run ADR-041 tier-0 + tier-1 detection.
 
@@ -132,7 +136,7 @@ async def detect_nat(
             _try_upnp_mapping(ports_to_map, lease_seconds=upnp_lease_seconds),
             timeout=timeout_s,
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         profile.detection_log.append(f"tier-1: UPnP discovery timed out after {timeout_s}s")
         upnp = None
     except ImportError as exc:
@@ -157,7 +161,8 @@ async def detect_nat(
                     upnp.external_ip = probed
                 else:
                     profile.detection_log.append(
-                        f"tier-1: external IP probe {external_ip_probe_url!r} returned no valid IPv4"
+                        f"tier-1: external IP probe {external_ip_probe_url!r} "
+                        "returned no valid IPv4"
                     )
             if not upnp.external_ip or upnp.external_ip == "0.0.0.0":
                 profile.operator_guidance = (
@@ -187,21 +192,15 @@ async def detect_nat(
             return profile  # tier 4 — unreachable in practice
 
         public_url = f"http://{upnp.external_ip}:{bind_port}"
-        transport_url: Optional[str] = None
-        if (
-            transport_port
-            and transport_port in upnp.mapped_ports
-            and transport_port != bind_port
-        ):
+        transport_url: str | None = None
+        if transport_port and transport_port in upnp.mapped_ports and transport_port != bind_port:
             transport_url = f"iicp://{upnp.external_ip}:{transport_port}"
             profile.detection_log.append(
                 f"tier-1: UPnP mapped {bind_port} → {public_url} AND "
                 f"{transport_port} → {transport_url} (spec v0.7.0 dual-endpoint)"
             )
         else:
-            profile.detection_log.append(
-                f"tier-1: UPnP mapped {bind_port} → {public_url}"
-            )
+            profile.detection_log.append(f"tier-1: UPnP mapped {bind_port} → {public_url}")
 
         return NatProfile(
             tier=1,
@@ -236,14 +235,15 @@ async def detect_nat(
 
 # ── UPnP helpers ─────────────────────────────────────────────────────────────
 
+
 @dataclass
 class _UpnpResult:
     success: bool
-    external_ip: Optional[str] = None
-    external_port: Optional[int] = None  # primary mapped port (first in the list)
+    external_ip: str | None = None
+    external_port: int | None = None  # primary mapped port (first in the list)
     mapped_ports: list[int] = field(default_factory=list)  # all successfully mapped ports
-    igd_device: Optional[str] = None
-    error: Optional[str] = None
+    igd_device: str | None = None
+    error: str | None = None
 
 
 async def _try_upnp_mapping(
@@ -267,10 +267,10 @@ def _upnp_mapping_blocking(internal_ports: list[int], lease_seconds: int) -> _Up
     """
     try:
         import upnpclient  # type: ignore[import-untyped]
-    except ImportError:
+    except ImportError as exc:
         raise ImportError(
             "upnpclient not installed — install with: pip install 'iicp-client[nat]'"
-        )
+        ) from exc
 
     if not internal_ports:
         return _UpnpResult(success=False, error="no ports specified")
@@ -292,7 +292,8 @@ def _upnp_mapping_blocking(internal_ports: list[int], lease_seconds: int) -> _Up
 
     try:
         wan_svc = next(
-            s for s in igd.service_map.values()
+            s
+            for s in igd.service_map.values()
             if "WANIPConn" in s.service_type or "WANPPPConn" in s.service_type
         )
         ext_ip = wan_svc.GetExternalIPAddress()["NewExternalIPAddress"]
@@ -303,10 +304,7 @@ def _upnp_mapping_blocking(internal_ports: list[int], lease_seconds: int) -> _Up
     # active, the socket-to-8.8.8.8 trick returns the VPN-tunnel IP, not the
     # LAN IP — FRITZ!Box rejects AddPortMapping for NewInternalClient that
     # isn't on its LAN (UPnP error 606 / 718).
-    local_ip = (
-        _detect_local_ip_matching_igd(igd)
-        or _detect_local_ip_for_default_gateway()
-    )
+    local_ip = _detect_local_ip_matching_igd(igd) or _detect_local_ip_for_default_gateway()
 
     try:
         wan_svc.AddPortMapping(
@@ -323,7 +321,10 @@ def _upnp_mapping_blocking(internal_ports: list[int], lease_seconds: int) -> _Up
         return _UpnpResult(
             success=False,
             external_ip=ext_ip,
-            error=f"AddPortMapping failed for primary port {primary_port}: {exc} (NewInternalClient={local_ip})",
+            error=(
+                f"AddPortMapping failed for primary port {primary_port}: {exc} "
+                f"(NewInternalClient={local_ip})"
+            ),
             igd_device=str(igd),
         )
 
@@ -344,7 +345,9 @@ def _upnp_mapping_blocking(internal_ports: list[int], lease_seconds: int) -> _Up
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "UPnP: failed to map additional port %d (primary %d already mapped): %s",
-                extra, primary_port, exc,
+                extra,
+                primary_port,
+                exc,
             )
 
     return _UpnpResult(
@@ -356,7 +359,7 @@ def _upnp_mapping_blocking(internal_ports: list[int], lease_seconds: int) -> _Up
     )
 
 
-def _detect_local_ip_matching_igd(igd) -> Optional[str]:
+def _detect_local_ip_matching_igd(igd) -> str | None:
     """Find a local interface IP on the same /24 subnet as the IGD device.
 
     Mirrors the adapter's helper to avoid the VPN-tunnel-IP gotcha.
@@ -384,6 +387,7 @@ def _detect_local_ip_matching_igd(igd) -> Optional[str]:
 
     try:
         import ifaddr  # type: ignore[import-untyped]
+
         for adapter in ifaddr.get_adapters():
             for ip in adapter.ips:
                 if isinstance(ip.ip, str) and ip.ip.startswith(igd_prefix):
@@ -413,7 +417,8 @@ def _detect_local_ip_for_default_gateway() -> str:
 
 # ── External-IP probe + routability helpers ──────────────────────────────────
 
-async def _probe_external_ip(url: str, *, timeout_s: float = 5.0) -> Optional[str]:
+
+async def _probe_external_ip(url: str, *, timeout_s: float = 5.0) -> str | None:
     """Issue #331 Phase A: fetch the WAN IPv4 from an HTTPS probe URL.
 
     Validates the response is a public IPv4 outside RFC1918, loopback, link-
@@ -473,8 +478,13 @@ def _looks_routable(url: str) -> bool:
     if host in never_routable:
         return False
     suffixes = (
-        ".localhost", ".local", ".test", ".example",
-        ".invalid", ".lan", ".internal",
+        ".localhost",
+        ".local",
+        ".test",
+        ".example",
+        ".invalid",
+        ".lan",
+        ".internal",
     )
     if any(host.endswith(s) for s in suffixes):
         return False
@@ -508,7 +518,7 @@ _CGNAT_HINTS = ("cgn", "cgnat", "ds-lite", "dslite", "nat64")
 _SHARED_HINTS = ("shared",)
 
 
-def _detect_cgnat(external_ip: str) -> Optional[str]:
+def _detect_cgnat(external_ip: str) -> str | None:
     """Reverse-DNS heuristic for ISP carrier-grade NAT.
 
     Returns a warning string when the hostname for `external_ip` matches a

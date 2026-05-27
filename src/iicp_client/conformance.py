@@ -29,13 +29,14 @@ Usage::
             if not r.passed:
                 logger.warning("conformance %s: %s", r.test_id, r.message)
 """
+
 from __future__ import annotations
 
 import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -48,6 +49,7 @@ _DISCOVER_INTENT = "urn:iicp:intent:llm:chat:v1"
 
 
 # ── Result types ─────────────────────────────────────────────────────────
+
 
 @dataclass
 class ProbeResult:
@@ -83,6 +85,7 @@ class ConformanceReport:
 
 # ── Individual probes ─────────────────────────────────────────────────────
 
+
 async def _check_registered(node: Any) -> ProbeResult:
     """CONF-REG-01: node_id (config) is set and we have a token in hand.
 
@@ -97,7 +100,9 @@ async def _check_registered(node: Any) -> ProbeResult:
         short = node_id[:8] + "…" if len(node_id) > 8 else node_id
         return ProbeResult("CONF-REG-01", True, f"Registered ({short})")
     if node_id:
-        return ProbeResult("CONF-REG-01", True, f"node_id set ({node_id[:8]}…); token not tracked by SDK")
+        return ProbeResult(
+            "CONF-REG-01", True, f"node_id set ({node_id[:8]}…); token not tracked by SDK"
+        )
     return ProbeResult("CONF-REG-01", False, "node_id empty — register() not yet called")
 
 
@@ -112,7 +117,9 @@ async def _check_health_schema(local_port: int) -> ProbeResult:
             return ProbeResult("CONF-HEALTH-01", False, f"HTTP {resp.status_code}", latency)
         missing = _REQUIRED_HEALTH_FIELDS - set(resp.json().keys())
         if missing:
-            return ProbeResult("CONF-HEALTH-01", False, f"Missing fields: {sorted(missing)}", latency)
+            return ProbeResult(
+                "CONF-HEALTH-01", False, f"Missing fields: {sorted(missing)}", latency
+            )
         return ProbeResult("CONF-HEALTH-01", True, f"OK ({latency:.0f}ms)", latency)
     except Exception as exc:  # noqa: BLE001
         return ProbeResult("CONF-HEALTH-01", False, f"Error: {exc}")
@@ -124,7 +131,8 @@ async def _check_reachability(node: Any) -> ProbeResult:
     endpoint = cfg.endpoint.rstrip("/") if cfg.endpoint else ""
     if not endpoint or any(p in endpoint for p in _NON_ROUTABLE):
         return ProbeResult(
-            "CONF-REACH-01", False,
+            "CONF-REACH-01",
+            False,
             "endpoint is non-routable — external check skipped; "
             "see https://iicp.network/docs/port-forwarding",
         )
@@ -133,7 +141,7 @@ async def _check_reachability(node: Any) -> ProbeResult:
     without_scheme = endpoint
     for scheme in ("https://", "http://"):
         if endpoint.startswith(scheme):
-            without_scheme = endpoint[len(scheme):]
+            without_scheme = endpoint[len(scheme) :]
             break
     authority = without_scheme.split("/")[0]
     if ":" in authority:
@@ -149,7 +157,11 @@ async def _check_reachability(node: Any) -> ProbeResult:
     directory_url = cfg.directory_url.rstrip("/")
     # SDK directory_url already includes /api; the probe endpoint is /v1/probe
     # under that root so the full URL is e.g. https://iicp.network/api/v1/probe
-    probe_url = f"{directory_url}/v1/probe" if directory_url.endswith("/api") else f"{directory_url}/api/v1/probe"
+    probe_url = (
+        f"{directory_url}/v1/probe"
+        if directory_url.endswith("/api")
+        else f"{directory_url}/api/v1/probe"
+    )
 
     t0 = time.monotonic()
     try:
@@ -161,7 +173,10 @@ async def _check_reachability(node: Any) -> ProbeResult:
             if body.get("reachable"):
                 return ProbeResult("CONF-REACH-01", True, f"Reachable ({latency:.0f}ms)", latency)
             return ProbeResult(
-                "CONF-REACH-01", False, body.get("error", "not reachable"), latency,
+                "CONF-REACH-01",
+                False,
+                body.get("error", "not reachable"),
+                latency,
             )
         return ProbeResult("CONF-REACH-01", False, f"HTTP {resp.status_code}", latency)
     except Exception as exc:  # noqa: BLE001
@@ -176,7 +191,8 @@ async def _check_discover_self(node: Any) -> ProbeResult:
 
     directory_url = cfg.directory_url.rstrip("/")
     discover_url = (
-        f"{directory_url}/v1/discover" if directory_url.endswith("/api")
+        f"{directory_url}/v1/discover"
+        if directory_url.endswith("/api")
         else f"{directory_url}/api/v1/discover"
     )
 
@@ -190,17 +206,23 @@ async def _check_discover_self(node: Any) -> ProbeResult:
         nodes = resp.json().get("nodes", [])
         if any(n.get("node_id") == cfg.node_id for n in nodes):
             return ProbeResult(
-                "CONF-DISC-01", True, f"Found in NODELIST ({len(nodes)} nodes)", latency,
+                "CONF-DISC-01",
+                True,
+                f"Found in NODELIST ({len(nodes)} nodes)",
+                latency,
             )
         return ProbeResult(
-            "CONF-DISC-01", False,
-            f"node_id absent from NODELIST (got {len(nodes)} nodes)", latency,
+            "CONF-DISC-01",
+            False,
+            f"node_id absent from NODELIST (got {len(nodes)} nodes)",
+            latency,
         )
     except Exception as exc:  # noqa: BLE001
         return ProbeResult("CONF-DISC-01", False, f"Discover error: {exc}")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────
+
 
 async def run_conformance_checks(
     node: Any, local_port: int = 8080, *, node_token: str | None = None
@@ -218,14 +240,16 @@ async def run_conformance_checks(
     if node_token is not None:
         # Stash on the node so _check_registered can find it without polluting
         # the IicpNode public API.
-        setattr(node, "_last_token", node_token)
+        node._last_token = node_token
 
-    results: list[ProbeResult] = list(await asyncio.gather(
-        _check_registered(node),
-        _check_health_schema(local_port),
-        _check_reachability(node),
-        _check_discover_self(node),
-    ))
+    results: list[ProbeResult] = list(
+        await asyncio.gather(
+            _check_registered(node),
+            _check_health_schema(local_port),
+            _check_reachability(node),
+            _check_discover_self(node),
+        )
+    )
 
     for r in results:
         if r.passed:
@@ -236,6 +260,6 @@ async def run_conformance_checks(
     return ConformanceReport(
         pass_count=sum(1 for r in results if r.passed),
         fail_count=sum(1 for r in results if not r.passed),
-        last_run_at=datetime.now(timezone.utc).isoformat(),
+        last_run_at=datetime.now(UTC).isoformat(),
         tests=results,
     )

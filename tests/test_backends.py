@@ -1,14 +1,14 @@
 """Unit tests for the openai_compat backend helper."""
+
 from __future__ import annotations
 
 import httpx
-import pytest
 import respx
 
 from iicp_client.backends import openai_compat_handler
 
-
 # ── Factory configuration ──────────────────────────────────────────────────
+
 
 class TestFactoryDefaults:
     def test_returns_callable(self):
@@ -17,6 +17,7 @@ class TestFactoryDefaults:
 
 
 # ── Happy path: chat / completions / embeddings ────────────────────────────
+
 
 @respx.mock
 async def test_chat_completion_happy_path():
@@ -50,10 +51,12 @@ async def test_factory_model_is_injected_when_payload_missing():
         return_value=httpx.Response(200, json={"choices": []})
     )
     handler = openai_compat_handler(model="qwen2.5:0.5b")
-    await handler({
-        "intent": "urn:iicp:intent:llm:chat:v1",
-        "payload": {"messages": []},
-    })
+    await handler(
+        {
+            "intent": "urn:iicp:intent:llm:chat:v1",
+            "payload": {"messages": []},
+        }
+    )
     sent_body = route.calls[0].request.read().decode()
     assert "qwen2.5:0.5b" in sent_body
 
@@ -66,10 +69,12 @@ async def test_task_payload_model_overrides_factory_default():
         return_value=httpx.Response(200, json={"choices": []})
     )
     handler = openai_compat_handler(model="qwen2.5:0.5b")
-    await handler({
-        "intent": "urn:iicp:intent:llm:chat:v1",
-        "payload": {"messages": [], "model": "llama-3-8b"},
-    })
+    await handler(
+        {
+            "intent": "urn:iicp:intent:llm:chat:v1",
+            "payload": {"messages": [], "model": "llama-3-8b"},
+        }
+    )
     sent_body = route.calls[0].request.read().decode()
     assert "llama-3-8b" in sent_body
     assert "qwen2.5:0.5b" not in sent_body
@@ -81,10 +86,12 @@ async def test_completion_intent_routes_to_completions_path():
         return_value=httpx.Response(200, json={"choices": [{"text": "PONG"}]})
     )
     handler = openai_compat_handler(model="qwen2.5:0.5b")
-    result = await handler({
-        "intent": "urn:iicp:intent:llm:completion:v1",
-        "payload": {"prompt": "ping"},
-    })
+    result = await handler(
+        {
+            "intent": "urn:iicp:intent:llm:completion:v1",
+            "payload": {"prompt": "ping"},
+        }
+    )
     assert route.calls.call_count == 1
     assert result["result"]["choices"][0]["text"] == "PONG"
 
@@ -95,14 +102,17 @@ async def test_embedding_intent_routes_to_embeddings_path():
         return_value=httpx.Response(200, json={"data": [{"embedding": [0.1, 0.2]}]})
     )
     handler = openai_compat_handler(model="text-embedding-3-small")
-    result = await handler({
-        "intent": "urn:iicp:intent:llm:embedding:v1",
-        "payload": {"input": "hello"},
-    })
+    result = await handler(
+        {
+            "intent": "urn:iicp:intent:llm:embedding:v1",
+            "payload": {"input": "hello"},
+        }
+    )
     assert result["result"]["data"][0]["embedding"] == [0.1, 0.2]
 
 
 # ── Error paths ────────────────────────────────────────────────────────────
+
 
 async def test_unsupported_intent_returns_400():
     handler = openai_compat_handler(model="q")
@@ -114,10 +124,12 @@ async def test_unsupported_intent_returns_400():
 async def test_no_model_returns_400():
     """No factory default AND no model in task payload → 400."""
     handler = openai_compat_handler(model=None)
-    result = await handler({
-        "intent": "urn:iicp:intent:llm:chat:v1",
-        "payload": {"messages": []},
-    })
+    result = await handler(
+        {
+            "intent": "urn:iicp:intent:llm:chat:v1",
+            "payload": {"messages": []},
+        }
+    )
     assert result["error_code"] == 400
     assert "no model" in result["error_message"]
 
@@ -135,10 +147,12 @@ async def test_upstream_500_is_surfaced():
         return_value=httpx.Response(500, text="model not loaded")
     )
     handler = openai_compat_handler(model="q")
-    result = await handler({
-        "intent": "urn:iicp:intent:llm:chat:v1",
-        "payload": {"messages": []},
-    })
+    result = await handler(
+        {
+            "intent": "urn:iicp:intent:llm:chat:v1",
+            "payload": {"messages": []},
+        }
+    )
     assert result["error_code"] == 500
     assert "model not loaded" in result["error_message"]
 
@@ -149,10 +163,12 @@ async def test_upstream_429_rate_limit_is_surfaced():
         return_value=httpx.Response(429, text="rate limit exceeded")
     )
     handler = openai_compat_handler(model="q")
-    result = await handler({
-        "intent": "urn:iicp:intent:llm:chat:v1",
-        "payload": {"messages": []},
-    })
+    result = await handler(
+        {
+            "intent": "urn:iicp:intent:llm:chat:v1",
+            "payload": {"messages": []},
+        }
+    )
     assert result["error_code"] == 429
     assert "rate limit" in result["error_message"]
 
@@ -163,10 +179,12 @@ async def test_api_key_sets_authorization_header():
         return_value=httpx.Response(200, json={})
     )
     handler = openai_compat_handler(model="q", api_key="sk-test-1234")
-    await handler({
-        "intent": "urn:iicp:intent:llm:chat:v1",
-        "payload": {"messages": []},
-    })
+    await handler(
+        {
+            "intent": "urn:iicp:intent:llm:chat:v1",
+            "payload": {"messages": []},
+        }
+    )
     sent_headers = dict(route.calls[0].request.headers)
     assert sent_headers.get("authorization") == "Bearer sk-test-1234"
 
@@ -177,8 +195,10 @@ async def test_base_url_trailing_slash_normalized():
         return_value=httpx.Response(200, json={})
     )
     handler = openai_compat_handler(base_url="http://localhost:11434/v1/", model="q")
-    result = await handler({
-        "intent": "urn:iicp:intent:llm:chat:v1",
-        "payload": {"messages": []},
-    })
+    result = await handler(
+        {
+            "intent": "urn:iicp:intent:llm:chat:v1",
+            "payload": {"messages": []},
+        }
+    )
     assert "error_code" not in result

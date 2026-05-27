@@ -1,4 +1,5 @@
 """IICP structured error type (ADR-016 §3)."""
+
 from __future__ import annotations
 
 

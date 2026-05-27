@@ -1,4 +1,5 @@
 """Unit tests for IicpClient (ADR-016 SDK-01..SDK-06)."""
+
 from __future__ import annotations
 
 import asyncio
@@ -51,22 +52,16 @@ def test_sdk04_rejects_oversized_timeout():
 def test_sdk03_rejects_invalid_intent_urn():
     client = IicpClient(ClientConfig(directory_url=DIRECTORY))
     with pytest.raises(IicpError) as exc_info:
-        client.submit(
-            TaskRequest(intent="bad-intent", payload={})
-        )
+        client.submit(TaskRequest(intent="bad-intent", payload={}))
     assert exc_info.value.code == "IICP-E001"
     assert not exc_info.value.retryable
 
 
 def test_sdk03_accepts_valid_intent_urn(respx_mock):
-    respx_mock.get(DISCOVER_URL).mock(
-        return_value=httpx.Response(200, json={"nodes": []})
-    )
+    respx_mock.get(DISCOVER_URL).mock(return_value=httpx.Response(200, json={"nodes": []}))
     client = IicpClient(ClientConfig(directory_url=DIRECTORY))
     with pytest.raises(IicpError) as exc_info:
-        client.submit(
-            TaskRequest(intent="urn:iicp:intent:llm:chat:v1", payload={})
-        )
+        client.submit(TaskRequest(intent="urn:iicp:intent:llm:chat:v1", payload={}))
     assert exc_info.value.code == "IICP-E006"  # no nodes — URN was valid
 
 
@@ -128,6 +123,7 @@ def test_submit_happy_path():
 @respx.mock
 async def test_submit_sdk01_retries_transient(monkeypatch):
     """Transient 503 triggers a retry; second attempt succeeds."""
+
     async def _noop_sleep(_: float) -> None:
         pass
 
@@ -143,9 +139,7 @@ async def test_submit_sdk01_retries_transient(monkeypatch):
         ]
     )
     client = IicpClient(ClientConfig(directory_url=DIRECTORY, max_retries=3))
-    resp = await client.submit_async(
-        TaskRequest(intent="urn:iicp:intent:llm:chat:v1", payload={})
-    )
+    resp = await client.submit_async(TaskRequest(intent="urn:iicp:intent:llm:chat:v1", payload={}))
     assert resp.status == "success"
 
 
@@ -153,9 +147,7 @@ async def test_submit_sdk01_retries_transient(monkeypatch):
 def test_submit_non_retryable_raises_immediately():
     respx.get(DISCOVER_URL).mock(return_value=httpx.Response(200, json=GOOD_NODES))
     respx.post(TASK_URL).mock(
-        return_value=httpx.Response(
-            401, json={"code": "IICP-E002", "message": "unauthorized"}
-        )
+        return_value=httpx.Response(401, json={"code": "IICP-E002", "message": "unauthorized"})
     )
     client = IicpClient(ClientConfig(directory_url=DIRECTORY))
     with pytest.raises(IicpError) as exc_info:
@@ -212,9 +204,7 @@ def test_chat_sdk02_openai_compat_shape():
 @respx.mock
 def test_sdk06_node_token_not_in_error():
     respx.get(DISCOVER_URL).mock(return_value=httpx.Response(200, json=GOOD_NODES))
-    respx.post(TASK_URL).mock(
-        return_value=httpx.Response(400, json={"message": "bad request"})
-    )
+    respx.post(TASK_URL).mock(return_value=httpx.Response(400, json={"message": "bad request"}))
     secret = "super-secret-token"
     client = IicpClient(ClientConfig(directory_url=DIRECTORY))
     with pytest.raises(IicpError) as exc_info:
@@ -229,6 +219,7 @@ def test_sdk06_node_token_not_in_error():
     assert secret not in err.message
     assert secret not in str(err)
     assert secret not in repr(err)
+
 
 @respx.mock
 def test_discover_passes_min_reputation_and_model():
@@ -272,17 +263,19 @@ def test_node_register_payload_spec_compliant():
     route = respx.post("https://iicp.test/v1/register").mock(
         return_value=httpx.Response(201, json={"node_token": "tok-1", "node_id": "n-1"})
     )
-    node = IicpNode(NodeConfig(
-        node_id="n-1",
-        endpoint="https://provider.example.com:8080",
-        intent="urn:iicp:intent:llm:chat:v1",
-        model="llama-3-8b",
-        region="eu-central",
-        directory_url="https://iicp.test",
-        max_concurrent=2,
-        tokens_per_min=2000,
-        max_tokens=8192,
-    ))
+    node = IicpNode(
+        NodeConfig(
+            node_id="n-1",
+            endpoint="https://provider.example.com:8080",
+            intent="urn:iicp:intent:llm:chat:v1",
+            model="llama-3-8b",
+            region="eu-central",
+            directory_url="https://iicp.test",
+            max_concurrent=2,
+            tokens_per_min=2000,
+            max_tokens=8192,
+        )
+    )
     asyncio.run(node.register())
 
     payload = json.loads(route.calls[0].request.content)
@@ -303,14 +296,16 @@ def test_node_register_includes_transport_endpoint_when_set():
     route = respx.post("https://iicp.test/v1/register").mock(
         return_value=httpx.Response(201, json={"node_token": "tok-2", "node_id": "n-2"})
     )
-    node = IicpNode(NodeConfig(
-        node_id="n-2",
-        endpoint="https://provider.example.com:8080",
-        intent="urn:iicp:intent:llm:chat:v1",
-        model="qwen2.5:0.5b",
-        directory_url="https://iicp.test",
-        transport_endpoint="iicp://provider.example.com:9484",
-    ))
+    node = IicpNode(
+        NodeConfig(
+            node_id="n-2",
+            endpoint="https://provider.example.com:8080",
+            intent="urn:iicp:intent:llm:chat:v1",
+            model="qwen2.5:0.5b",
+            directory_url="https://iicp.test",
+            transport_endpoint="iicp://provider.example.com:9484",
+        )
+    )
     asyncio.run(node.register())
 
     payload = json.loads(route.calls[0].request.content)
@@ -327,14 +322,16 @@ def test_node_register_legacy_capabilities_list_folds_into_models():
     route = respx.post("https://iicp.test/v1/register").mock(
         return_value=httpx.Response(201, json={"node_token": "tok-3", "node_id": "n-3"})
     )
-    node = IicpNode(NodeConfig(
-        node_id="n-3",
-        endpoint="https://provider.example.com:8080",
-        intent="urn:iicp:intent:llm:chat:v1",
-        model="llama-3-8b",
-        capabilities=["mistral-7b", "phi-3-mini"],
-        directory_url="https://iicp.test",
-    ))
+    node = IicpNode(
+        NodeConfig(
+            node_id="n-3",
+            endpoint="https://provider.example.com:8080",
+            intent="urn:iicp:intent:llm:chat:v1",
+            model="llama-3-8b",
+            capabilities=["mistral-7b", "phi-3-mini"],
+            directory_url="https://iicp.test",
+        )
+    )
     asyncio.run(node.register())
 
     payload = json.loads(route.calls[0].request.content)
@@ -348,17 +345,19 @@ def test_node_register_includes_nat_observability_when_set():
     route = respx.post("https://iicp.test/v1/register").mock(
         return_value=httpx.Response(201, json={"node_token": "tok-nat", "node_id": "n-nat"})
     )
-    node = IicpNode(NodeConfig(
-        node_id="n-nat",
-        endpoint="https://provider.example.com:8080",
-        intent="urn:iicp:intent:llm:chat:v1",
-        model="qwen2.5:0.5b",
-        directory_url="https://iicp.test",
-        transport_endpoint="iicp://provider.example.com:9484",
-        transport_method="upnp_mapped",
-        nat_type="full_cone",
-        transport_metadata={"tier": 1, "detection_log_tail": ["upnp ok"]},
-    ))
+    node = IicpNode(
+        NodeConfig(
+            node_id="n-nat",
+            endpoint="https://provider.example.com:8080",
+            intent="urn:iicp:intent:llm:chat:v1",
+            model="qwen2.5:0.5b",
+            directory_url="https://iicp.test",
+            transport_endpoint="iicp://provider.example.com:9484",
+            transport_method="upnp_mapped",
+            nat_type="full_cone",
+            transport_metadata={"tier": 1, "detection_log_tail": ["upnp ok"]},
+        )
+    )
     asyncio.run(node.register())
 
     payload = json.loads(route.calls[0].request.content)
@@ -384,13 +383,15 @@ def test_apply_nat_profile_populates_fields_from_nat_profile():
     route = respx.post("https://iicp.test/v1/register").mock(
         return_value=httpx.Response(201, json={"node_token": "tok-applied", "node_id": "n-applied"})
     )
-    node = IicpNode(NodeConfig(
-        node_id="n-applied",
-        endpoint="http://placeholder.example.com:8080",  # overridden by apply_nat_profile
-        intent="urn:iicp:intent:llm:chat:v1",
-        model="q",
-        directory_url="https://iicp.test",
-    ))
+    node = IicpNode(
+        NodeConfig(
+            node_id="n-applied",
+            endpoint="http://placeholder.example.com:8080",  # overridden by apply_nat_profile
+            intent="urn:iicp:intent:llm:chat:v1",
+            model="q",
+            directory_url="https://iicp.test",
+        )
+    )
     node.apply_nat_profile(profile)
     asyncio.run(node.register())
 
@@ -422,13 +423,15 @@ def test_apply_nat_profile_unreachable_does_not_overwrite_endpoint():
     route = respx.post("https://iicp.test/v1/register").mock(
         return_value=httpx.Response(201, json={"node_token": "tok-keep", "node_id": "n-keep"})
     )
-    node = IicpNode(NodeConfig(
-        node_id="n-keep",
-        endpoint="https://manual-endpoint.example.com:8080",
-        intent="urn:iicp:intent:llm:chat:v1",
-        model="q",
-        directory_url="https://iicp.test",
-    ))
+    node = IicpNode(
+        NodeConfig(
+            node_id="n-keep",
+            endpoint="https://manual-endpoint.example.com:8080",
+            intent="urn:iicp:intent:llm:chat:v1",
+            model="q",
+            directory_url="https://iicp.test",
+        )
+    )
     node.apply_nat_profile(profile)
     asyncio.run(node.register())
 

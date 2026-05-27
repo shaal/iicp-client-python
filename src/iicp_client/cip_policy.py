@@ -24,6 +24,7 @@ ADR-014 safety boundary: remote shell, file access, browser automation,
 credential sharing, and private memory access are explicitly prohibited.
 The gate enforces "no by default" — operators opt-in field by field.
 """
+
 from __future__ import annotations
 
 import logging
@@ -68,12 +69,11 @@ class CooperativeInferencePolicy:
         if not self.enabled or not self.allow_coordinator:
             logger.debug(
                 "cip_policy: coordinator denied (enabled=%s, allow_coordinator=%s)",
-                self.enabled, self.allow_coordinator,
+                self.enabled,
+                self.allow_coordinator,
             )
             return False
-        logger.debug(
-            "cip_policy: coordinator accepted (max_replicas=%d)", self.max_replicas
-        )
+        logger.debug("cip_policy: coordinator accepted (max_replicas=%d)", self.max_replicas)
         return True
 
     def check_worker(self) -> bool:
@@ -81,7 +81,8 @@ class CooperativeInferencePolicy:
         if not self.enabled or not self.allow_worker:
             logger.debug(
                 "cip_policy: worker denied (enabled=%s, allow_worker=%s)",
-                self.enabled, self.allow_worker,
+                self.enabled,
+                self.allow_worker,
             )
             return False
         logger.debug(

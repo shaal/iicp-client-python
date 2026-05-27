@@ -1,4 +1,5 @@
 """IicpClient — primary entrypoint for the IICP Python SDK (ADR-016 §1)."""
+
 from __future__ import annotations
 
 import asyncio
@@ -39,9 +40,7 @@ class IicpClient:
         self._cfg = config or ClientConfig()
         if self._cfg.timeout_ms > _MAX_TIMEOUT_MS:
             # SDK-04: reject oversized timeouts at construction time
-            raise ValueError(
-                f"timeout_ms must be ≤ {_MAX_TIMEOUT_MS}; got {self._cfg.timeout_ms}"
-            )
+            raise ValueError(f"timeout_ms must be ≤ {_MAX_TIMEOUT_MS}; got {self._cfg.timeout_ms}")
 
     # ------------------------------------------------------------------
     # Public async API
@@ -68,6 +67,7 @@ class IicpClient:
             params["model"] = opts.model
 
         import time
+
         t0 = time.monotonic()
         data = await get_json(
             f"{self._cfg.directory_url}/v1/discover",

@@ -25,6 +25,7 @@ must know immediately whether a node can accept a task so it can route
 elsewhere; a 429-equivalent is more useful than hidden queuing
 (adapter doc verbatim).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -55,7 +56,10 @@ class ConcurrencyGate:
             async with gate.acquire():
                 result = await run_task(...)
         except CapacityExceededError as exc:
-            return {"error_code": 429, "error_message": f"IICP-E021: max_concurrent={exc.max_concurrent} reached"}
+            return {
+                "error_code": 429,
+                "error_message": f"IICP-E021: max_concurrent={exc.max_concurrent} reached",
+            }
 
     `active_jobs` and `load` are read-only views useful for heartbeat
     payloads — the directory's NodeScorer uses load to down-rank busy

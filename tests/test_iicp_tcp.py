@@ -7,6 +7,7 @@ empty-PING, DISCOVER, CALL via handler, CLOSE, and bad-magic.
 Verifies the iter-1410 framing fix is correctly ported — pre-fix the session
 loop closed on every payload-bearing frame.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -50,6 +51,7 @@ async def _read_frame(reader: asyncio.StreamReader) -> tuple[int, bytes]:
 
 # ── fixtures ────────────────────────────────────────────────────────────────
 
+
 @pytest.fixture
 async def server_port():
     """Boot a server on a free port; yield the port; clean shutdown after."""
@@ -80,6 +82,7 @@ async def server_port():
 
 
 # ── tests ───────────────────────────────────────────────────────────────────
+
 
 async def test_init_returns_ack_with_node_id(server_port):
     reader, writer = await asyncio.open_connection("127.0.0.1", server_port)
@@ -141,7 +144,9 @@ async def test_discover_invokes_lookup_returns_nodes(server_port):
         await _read_frame(reader)
 
         intent = "urn:iicp:intent:llm:chat:v1"
-        writer.write(_frame(MsgType.DISCOVER, cbor2.dumps({2: "sess-1", 3: intent}, canonical=True)))
+        writer.write(
+            _frame(MsgType.DISCOVER, cbor2.dumps({2: "sess-1", 3: intent}, canonical=True))
+        )
         await writer.drain()
         mt, payload = await _read_frame(reader)
         assert mt == MsgType.RESPONSE
@@ -164,6 +169,7 @@ async def test_call_invokes_handler_returns_result(server_port):
         await _read_frame(reader)
 
         import json
+
         call_payload = {
             2: "sess-c1",
             3: "urn:iicp:intent:llm:chat:v1",
@@ -241,6 +247,7 @@ async def test_payload_bearing_frame_does_not_close_session(server_port):
 
 
 # ── IicpTcpClient tests — true round-trip against the server fixture ────────
+
 
 async def test_client_context_manager_handshake_and_close(server_port):
     """iter-1417: connecting via context manager performs handshake on enter and

@@ -19,10 +19,12 @@ Drives Ollama (port 11434), vLLM, LM Studio, llama-cpp-server, or any
 other OpenAI-compatible HTTP server. The provider URL is the operator's
 choice — by default `http://localhost:11434/v1` for Ollama.
 """
+
 from __future__ import annotations
 
 import logging
-from typing import Any, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 import httpx
 
@@ -68,7 +70,9 @@ def openai_compat_handler(
         if not isinstance(payload, dict):
             return {
                 "error_code": 400,
-                "error_message": f"openai_compat: task.payload must be a dict, got {type(payload).__name__}",
+                "error_message": (
+                    f"openai_compat: task.payload must be a dict, got {type(payload).__name__}"
+                ),
             }
 
         path = _INTENT_TO_PATH.get(intent)

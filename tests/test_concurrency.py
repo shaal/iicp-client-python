@@ -1,4 +1,5 @@
 """Unit tests for ConcurrencyGate + its wiring into IicpTcpServer CALLs."""
+
 from __future__ import annotations
 
 import asyncio
@@ -39,6 +40,7 @@ async def _read_frame(reader: asyncio.StreamReader) -> tuple[int, bytes]:
 
 
 # ── ConcurrencyGate primitive ──────────────────────────────────────────────
+
 
 class TestConcurrencyGate:
     def test_rejects_max_concurrent_zero(self):
@@ -86,6 +88,7 @@ class TestConcurrencyGate:
 
 
 # ── IicpTcpServer integration ──────────────────────────────────────────────
+
 
 class TestTcpServerGateIntegration:
     @pytest.fixture
@@ -181,9 +184,11 @@ class TestTcpServerGateIntegration:
             handler=lambda task: asyncio.sleep(0.001, {"result": {"ok": True}}),
             concurrency_gate=None,
         )
+
         # Use a simpler handler that returns a dict directly
         async def h(task: dict) -> dict:
             return {"result": {"ok": True}}
+
         server.handler = h
         await server.start()
         try:

@@ -11,6 +11,7 @@ Available backends:
 Adding a new backend: create a module here that exports a factory like
 `openai_compat_handler` returning `async def(task: dict) -> dict`.
 """
+
 from iicp_client.backends.openai_compat import openai_compat_handler
 
 __all__ = ["openai_compat_handler"]

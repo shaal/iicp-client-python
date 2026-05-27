@@ -1,4 +1,5 @@
 """Public types for iicp-client (ADR-016 §1)."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -115,4 +116,3 @@ class Node:
 class NodeList:
     nodes: list[Node]
     query_ms: int
-
