@@ -1,4 +1,4 @@
-# ADR-041 tier-3 / #341 — relay-as-last-resort R2 (worker lifecycle)
+# ADR-016: IICP client SDK conformance — ADR-041 tier-3 / #341 relay R2
 """Unit tests for RelayWorkerClient frame helpers and reconnect logic."""
 
 from __future__ import annotations

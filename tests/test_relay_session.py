@@ -1,4 +1,4 @@
-# ADR-041 tier-3 / #341 — relay-as-last-resort R1
+# ADR-016: IICP client SDK conformance — ADR-041 tier-3 / #341 relay R1
 """Unit tests for RelaySessionRegistry and encode helpers (relay_session.py + iicp_tcp.py)."""
 
 from __future__ import annotations
