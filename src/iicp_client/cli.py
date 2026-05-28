@@ -158,6 +158,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "discovery succeeds but GetExternalIPAddress is auth-gated. "
         "env: IICP_EXTERNAL_IP_PROBE_URL",
     )
+    serve.add_argument(
+        "--relay-worker-endpoint",
+        default=_env("IICP_RELAY_WORKER_ENDPOINT"),
+        help="R2 relay-as-last-resort: <host>:<port> of a relay node to connect "
+        "outbound to (e.g. relay.example.com:9485). When set, this node acts "
+        "as a relay-worker — inbound tasks are forwarded through the relay for "
+        "operators behind CGNAT. env: IICP_RELAY_WORKER_ENDPOINT",
+    )
 
     return p
 
@@ -215,6 +223,7 @@ async def _serve(args: argparse.Namespace) -> int:
     node_id = args.node_id or f"sdk-{args.model.replace(':', '-')}-{uuid.uuid4().hex[:8]}"
     public_endpoint = args.public_endpoint or f"http://localhost:{args.port}"
 
+    relay_worker_ep: str | None = getattr(args, "relay_worker_endpoint", None)
     cfg = NodeConfig(
         node_id=node_id,
         endpoint=public_endpoint,
@@ -223,6 +232,7 @@ async def _serve(args: argparse.Namespace) -> int:
         region=args.region,
         directory_url=args.directory_url,
         max_concurrent=args.max_concurrent,
+        relay_worker_endpoint=relay_worker_ep or None,
     )
     node = IicpNode(cfg)
 

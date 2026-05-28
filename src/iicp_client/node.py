@@ -130,6 +130,10 @@ class NodeConfig:
     # Port for the RelayAcceptServer (R1 relay-as-last-resort, #341).
     # Workers behind CGNAT connect outbound to this port and send RELAY_BIND.
     relay_accept_port: int = 9485
+    # R2: when set, this node acts as a RELAY WORKER — it will connect outbound
+    # to the specified relay and advertise tasks through it (for CGNAT operators).
+    # Format: "host:port" — e.g. "relay.example.com:9485".
+    relay_worker_endpoint: str | None = None
     # Optional path to persist the peer list across restarts.
     peer_persist_path: str | None = None
 
@@ -797,6 +801,26 @@ class IicpNode:
                 logger.info("Relay accept server started on %s:%d", host, relay_port)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Relay accept server failed to start: %s — relay sessions disabled", exc)
+
+        # R2: if relay_worker_endpoint is configured, connect outbound to a relay.
+        # This node acts as a relay worker — its tasks are routed through the relay
+        # for operators behind CGNAT who can't receive inbound connections.
+        if self._cfg.relay_worker_endpoint:
+            relay_worker_ep = self._cfg.relay_worker_endpoint
+            _relay_host, _, _relay_port_str = relay_worker_ep.rpartition(":")
+            _relay_host = _relay_host or relay_worker_ep
+            _relay_port_n = int(_relay_port_str) if _relay_port_str.isdigit() else 9485
+            from iicp_client.relay_worker_client import RelayWorkerClient
+            relay_worker = RelayWorkerClient(
+                worker_id=self._cfg.node_id,
+                intent=self._cfg.intent,
+                relay_host=_relay_host,
+                relay_port=_relay_port_n,
+                task_handler=handler,
+                models=[self._cfg.model] if self._cfg.model else [],
+            )
+            bg_tasks.append(asyncio.create_task(relay_worker.run()))
+            logger.info("Relay worker started → %s:%d", _relay_host, _relay_port_n)
 
         try:
             await loop.run_in_executor(None, server.serve_forever)
