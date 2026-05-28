@@ -288,6 +288,16 @@ async def _serve(args: argparse.Namespace) -> int:
         model=args.model,
     )
 
+    # GAP-6: probe the backend for all available models and advertise them.
+    # _ollama_models is best-effort; on any error it returns [] and we fall
+    # back to the single configured model.
+    discovered = _ollama_models(args.backend_url)
+    if discovered:
+        extra = [m for m in discovered if m != args.model]
+        if extra:
+            cfg.capabilities = extra
+            logger.info("GAP-6: advertising %d additional models: %s", len(extra), extra[:6])
+
     token: str | None = None
     if not args.skip_registration:
         try:
