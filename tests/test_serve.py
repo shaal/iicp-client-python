@@ -231,6 +231,38 @@ class TestConcurrencyGate:
         assert body["error"]["code"] == "IICP-E021"
         assert any(k.lower() == "retry-after" and v == "2" for k, v in hdrs.items())
 
+
+class TestIdempotency:
+    def test_disabled_by_default_allows_resubmit(self):
+        cfg = NodeConfig(
+            node_id="idem-off",
+            endpoint="http://idem.local",
+            intent="urn:iicp:intent:llm:chat:v1",
+        )
+        h = _ServerHandle(cfg).start()
+        s1, _, _ = h.post("/v1/task", {"task_id": "dup", "intent": "x", "payload": {}})
+        s2, _, _ = h.post("/v1/task", {"task_id": "dup", "intent": "x", "payload": {}})
+        h.stop()
+        assert s1 == 200
+        assert s2 == 200
+
+    def test_enabled_rejects_duplicate_task_id(self):
+        cfg = NodeConfig(
+            node_id="idem-on",
+            endpoint="http://idem.local",
+            intent="urn:iicp:intent:llm:chat:v1",
+            enable_idempotency=True,
+        )
+        h = _ServerHandle(cfg).start()
+        s1, _, _ = h.post("/v1/task", {"task_id": "dup", "intent": "x", "payload": {}})
+        s2, body2, _ = h.post("/v1/task", {"task_id": "dup", "intent": "x", "payload": {}})
+        s3, _, _ = h.post("/v1/task", {"task_id": "other", "intent": "x", "payload": {}})
+        h.stop()
+        assert s1 == 200
+        assert s2 == 409
+        assert body2["error"]["code"] == "IICP-E010"
+        assert s3 == 200
+
     def test_429_under_concurrency_pressure(self):
         """With max_concurrent=1, a second concurrent request gets 429."""
         slow_started = threading.Event()

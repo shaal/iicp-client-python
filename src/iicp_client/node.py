@@ -24,9 +24,15 @@ import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 
 import httpx
+
+from iicp_client.availability import AvailabilityEvaluator
+from iicp_client.idempotency import IdempotencyGuard
+from iicp_client.peer_manager import PeerManager
+from iicp_client.scheduler import QUEUE_WAIT_S, is_queue_eligible
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +112,23 @@ class NodeConfig:
     # falls back to the key the directory returned on register (populated
     # by register() into IicpNode._node_hmac_key for subsequent calls).
     node_hmac_key: str = ""
+    # Phase 3+ availability windows (ADR-006 / spec/iicp-dir.md §register
+    # `availability`). Each entry: {"start": "HH:MM", "end": "HH:MM", "share": 0.0-1.0}
+    # in local time. Shapes the effective capacity advertised to the directory and
+    # gated at serve time. None/empty → always full capacity. See availability.py.
+    availability_windows: list[dict] | None = None
+    # ADR-010 task_id idempotency. Off by default to preserve the pre-0.6 contract
+    # (a task_id may be resubmitted). When True, a duplicate task_id within the
+    # 5-minute window is rejected with IICP-E010. See idempotency.py.
+    enable_idempotency: bool = False
+    # Phase 2 mesh layer (ADR-009/ADR-022). When True, serve() starts the gossip
+    # loop and exposes POST /v1/peers (HMAC peer exchange). See peer_manager.py.
+    enable_mesh: bool = False
+    # When True, serve() exposes POST /v1/relay to forward tasks to unreachable
+    # peers learned via gossip (ADR-022). Requires enable_mesh.
+    relay_capable: bool = False
+    # Optional path to persist the peer list across restarts.
+    peer_persist_path: str | None = None
 
 
 TaskHandler = Callable[[dict[str, Any]], Coroutine[Any, Any, dict[str, Any]]]
@@ -183,6 +206,15 @@ class IicpNode:
         self._sem = threading.Semaphore(config.max_concurrent)
         self._active_jobs = 0
         self._jobs_lock = threading.Lock()
+        self._availability = AvailabilityEvaluator(config.availability_windows)
+        self._idempotency = IdempotencyGuard()
+        self._peer_manager = PeerManager(
+            directory_url=config.directory_url,
+            node_token=config.node_hmac_key,
+            persist_path=(
+                Path(config.peer_persist_path) if config.peer_persist_path else None
+            ),
+        )
         self._nonces: dict[str, float] = {}
         self._nonces_lock = threading.Lock()
         self._metrics = _get_metrics()
@@ -361,6 +393,11 @@ class IicpNode:
                 "node_id": self._cfg.node_id,
                 "node_token": node_token,
                 "status": "available",
+                # Live capacity after availability shaping (ADR-006) so the
+                # directory's NodeScorer sees the operator's current window.
+                "max_concurrent": self._availability.effective_max_concurrent(
+                    self._cfg.max_concurrent
+                ),
             },
         )
         resp.raise_for_status()
@@ -425,8 +462,64 @@ class IicpNode:
             def do_POST(self) -> None:  # noqa: N802
                 if self.path == "/v1/task":
                     self._task()
+                elif self.path == "/v1/peers" and node._cfg.enable_mesh:
+                    self._peers()
+                elif self.path == "/v1/relay" and node._cfg.relay_capable:
+                    self._relay()
                 else:
                     self.send_error(404)
+
+            # ── POST /v1/peers (ADR-009 gossip exchange) ──────────────────
+
+            def _peers(self) -> None:
+                length = int(self.headers.get("Content-Length", 0))
+                raw = self.rfile.read(length) if length else b"{}"
+                sig = self.headers.get("X-IICP-Signature")
+                if not node._peer_manager.verify_exchange(raw, sig):
+                    self.send_error(401, "invalid peer signature")
+                    return
+                try:
+                    incoming = json.loads(raw).get("known_peers", [])
+                except (ValueError, json.JSONDecodeError):
+                    self.send_error(400, "invalid JSON body")
+                    return
+                if isinstance(incoming, list):
+                    # Entries may be ids (from gossip) or dicts; merge dict entries only.
+                    node._peer_manager.merge_peers([p for p in incoming if isinstance(p, dict)])
+                body = json.dumps({"peers": node._peer_manager.get_peers()}).encode()
+                self._json_response(200, body)
+
+            # ── POST /v1/relay (ADR-022 mesh relay) ───────────────────────
+
+            def _relay(self) -> None:
+                length = int(self.headers.get("Content-Length", 0))
+                try:
+                    payload = json.loads(self.rfile.read(length)) if length else {}
+                except (ValueError, json.JSONDecodeError):
+                    self.send_error(400, "invalid JSON body")
+                    return
+                target_id = payload.get("target_node_id", "")
+                task = payload.get("task", {})
+                if not target_id or not task:
+                    self.send_error(422, "target_node_id and task are required")
+                    return
+                target = node._peer_manager.relay_target(target_id)
+                if target is None:
+                    err = json.dumps(
+                        {"error": {"code": "IICP-E030", "message": "target not in peer list"}}
+                    ).encode()
+                    self._json_response(404, err)
+                    return
+                try:
+                    resp = httpx.post(
+                        f"{target['endpoint'].rstrip('/')}/v1/task", json=task, timeout=120.0
+                    )
+                    self._json_response(resp.status_code, resp.content)
+                except Exception as exc:  # noqa: BLE001
+                    err = json.dumps(
+                        {"error": {"code": "IICP-E031", "message": f"relay failed: {exc}"}}
+                    ).encode()
+                    self._json_response(502, err)
 
             # ── GET /iicp/health ──────────────────────────────────────────
 
@@ -440,6 +533,9 @@ class IicpNode:
                     if uid is not None
                     else {"active": False}
                 )
+                eff_max = node._availability.effective_max_concurrent(
+                    node._cfg.max_concurrent
+                )
                 body = json.dumps(
                     {
                         "status": "ok",
@@ -448,7 +544,8 @@ class IicpNode:
                         "load": round(active / denom, 3),
                         "active_jobs": active,
                         "max_concurrent": node._cfg.max_concurrent,
-                        "available": active < node._cfg.max_concurrent,
+                        "effective_max_concurrent": eff_max,
+                        "available": active < eff_max,
                         "model": node._cfg.model or "",
                         "intent": node._cfg.intent,
                         "pinhole_state": pinhole_state,
@@ -478,14 +575,62 @@ class IicpNode:
             # ── POST /v1/task ─────────────────────────────────────────────
 
             def _task(self) -> None:
-                # Concurrency gate — IICP-E021
-                if not node._sem.acquire(blocking=False):
+                # Read the body first so QoS-aware admission can see
+                # constraints.qos_class before deciding whether to wait for a slot.
+                try:
+                    length = int(self.headers.get("Content-Length", 0))
+                    body: dict[str, Any] = json.loads(self.rfile.read(length)) if length else {}
+                except (ValueError, json.JSONDecodeError):
+                    self.send_error(400, "invalid JSON body")
+                    return
+
+                constraints = body.get("constraints") or {}
+                qos = (
+                    constraints.get("qos_class", "best_effort")
+                    if isinstance(constraints, dict)
+                    else "best_effort"
+                )
+
+                # Availability gate (ADR-006) — reduced-capacity windows cap admissions
+                # below max_concurrent. This is a deliberate operator policy, so it
+                # rejects immediately (no QoS wait) when the window is full/closed.
+                eff_max = node._availability.effective_max_concurrent(node._cfg.max_concurrent)
+                with node._jobs_lock:
+                    at_window_cap = node._active_jobs >= eff_max
+                if at_window_cap:
                     err = json.dumps(
                         {
                             "error": {
                                 "code": "IICP-E021",
                                 "message": "capacity_exceeded",
-                                "qos_class": None,
+                                "qos_class": qos,
+                                "reason": "availability_window",
+                                "retry_after_ms": 2000,
+                            }
+                        }
+                    ).encode()
+                    self.send_response(429)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Retry-After", "2")
+                    self.send_header("Content-Length", str(len(err)))
+                    self.end_headers()
+                    self.wfile.write(err)
+                    return
+
+                # QoS-aware admission — IICP-E021. realtime/interactive wait briefly
+                # for a slot; batch/best-effort/unspecified fail fast so the proxy
+                # sees back-pressure immediately (ADR-006; see scheduler.py).
+                if is_queue_eligible(qos):
+                    acquired = node._sem.acquire(blocking=True, timeout=QUEUE_WAIT_S)
+                else:
+                    acquired = node._sem.acquire(blocking=False)
+                if not acquired:
+                    err = json.dumps(
+                        {
+                            "error": {
+                                "code": "IICP-E021",
+                                "message": "capacity_exceeded",
+                                "qos_class": qos,
                                 "retry_after_ms": 2000,
                             }
                         }
@@ -502,13 +647,26 @@ class IicpNode:
                     node._active_jobs += 1
                 t0 = time.monotonic()
                 try:
-                    length = int(self.headers.get("Content-Length", 0))
-                    body: dict[str, Any] = json.loads(self.rfile.read(length)) if length else {}
-
                     # Nonce replay — IICP-E011
                     if not node._check_nonce(body.get("nonce")):
                         err = json.dumps(
                             {"error": {"code": "IICP-E011", "message": "replay_detected"}}
+                        ).encode()
+                        self.send_response(409)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(err)))
+                        self.end_headers()
+                        self.wfile.write(err)
+                        return
+
+                    # Idempotency — duplicate task_id within the retry window (ADR-010).
+                    # Distinct from nonce replay: dedups a retried CALL of the same task.
+                    # Opt-in (NodeConfig.enable_idempotency) to preserve pre-0.6 behaviour.
+                    if node._cfg.enable_idempotency and not node._idempotency.check_and_register(
+                        body.get("task_id")
+                    ):
+                        err = json.dumps(
+                            {"error": {"code": "IICP-E010", "message": "duplicate_task"}}
                         ).encode()
                         self.send_response(409)
                         self.send_header("Content-Type", "application/json")
@@ -524,12 +682,6 @@ class IicpNode:
 
                     task_id = body.get("task_id", "")
                     intent = body.get("intent") or node._cfg.intent
-                    constraints = body.get("constraints") or {}
-                    qos = (
-                        constraints.get("qos_class", "best_effort")
-                        if isinstance(constraints, dict)
-                        else "best_effort"
-                    )
 
                     from iicp_client.otel_tracer import task_execute_span, task_validate_span
                     with task_validate_span(task_id):
@@ -579,6 +731,10 @@ class IicpNode:
             bg_tasks.append(asyncio.create_task(self._heartbeat_loop(node_token)))
         if self._pinhole_uid is not None:
             bg_tasks.append(asyncio.create_task(self._pinhole_renewal_loop()))
+        if self._cfg.enable_mesh:
+            # Phase 2 mesh: bootstrap from the directory then gossip every 30s.
+            await self._peer_manager.start(self._cfg.node_id)
+            bg_tasks.append(asyncio.create_task(self._peer_manager.gossip_loop()))
 
         try:
             await loop.run_in_executor(None, server.serve_forever)

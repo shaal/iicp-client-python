@@ -1,6 +1,13 @@
 """iicp-client — Official Python client SDK for the IICP protocol."""
 
-from iicp_client.backends import openai_compat_handler
+from iicp_client.availability import AvailabilityEvaluator, Window
+from iicp_client.backends import (
+    BACKEND_TYPES,
+    get_backend_handler,
+    llamacpp_handler,
+    openai_compat_handler,
+    vllm_handler,
+)
 from iicp_client.cip_policy import (
     CooperativeInferencePolicy,
 )
@@ -14,11 +21,21 @@ from iicp_client.client import IicpClient
 from iicp_client.concurrency import CapacityExceededError, ConcurrencyGate
 from iicp_client.conformance import ConformanceReport, ProbeResult, run_conformance_checks
 from iicp_client.errors import IicpError
+from iicp_client.idempotency import IdempotencyGuard
 from iicp_client.iicp_tcp import IicpTcpClient, IicpTcpClientError, IicpTcpServer, MsgType
-from iicp_client.nat_detection import NatProfile, delete_ipv6_pinhole, detect_nat, renew_ipv6_pinhole
-from iicp_client.otel_tracer import task_execute_span, task_validate_span
+from iicp_client.nat_detection import (
+    NatProfile,
+    delete_ipv6_pinhole,
+    detect_nat,
+    renew_ipv6_pinhole,
+)
 from iicp_client.node import IicpNode, NodeConfig
+from iicp_client.otel_tracer import task_execute_span, task_validate_span
+from iicp_client.peer_manager import PeerManager
 from iicp_client.pricing import PricingConfig, build_pricing_block, sign_body, verify_signature
+from iicp_client.scheduler import is_queue_eligible, qos_priority
+from iicp_client.token_validator import TokenValidator
+from iicp_client.trust_auditor import AuditReport, models_diverge, run_audit_pass
 from iicp_client.types import (
     ChatMessage,
     ChatOptions,
@@ -32,7 +49,7 @@ from iicp_client.types import (
     TaskResponse,
 )
 
-__version__ = "0.5.6"
+__version__ = "0.6.0"
 __all__ = [
     "IicpClient",
     "IicpError",
@@ -47,6 +64,20 @@ __all__ = [
     "detect_nat",
     "renew_ipv6_pinhole",
     "openai_compat_handler",
+    "vllm_handler",
+    "llamacpp_handler",
+    "get_backend_handler",
+    "BACKEND_TYPES",
+    "qos_priority",
+    "is_queue_eligible",
+    "AvailabilityEvaluator",
+    "Window",
+    "IdempotencyGuard",
+    "TokenValidator",
+    "AuditReport",
+    "models_diverge",
+    "run_audit_pass",
+    "PeerManager",
     "ClientConfig",
     "TaskAuth",
     "TaskConstraints",

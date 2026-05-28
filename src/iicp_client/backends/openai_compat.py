@@ -23,19 +23,10 @@ choice — by default `http://localhost:11434/v1` for Ollama.
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
-from typing import Any
 
-import httpx
+from iicp_client.backends.base import TaskHandler, build_openai_dialect_handler
 
 logger = logging.getLogger(__name__)
-
-# Maps IICP intent URN → OpenAI-compatible HTTP path.
-_INTENT_TO_PATH: dict[str, str] = {
-    "urn:iicp:intent:llm:chat:v1": "/chat/completions",
-    "urn:iicp:intent:llm:completion:v1": "/completions",
-    "urn:iicp:intent:llm:embedding:v1": "/embeddings",
-}
 
 
 def openai_compat_handler(
@@ -44,7 +35,7 @@ def openai_compat_handler(
     model: str | None = None,
     api_key: str = "",
     timeout_s: float = 30.0,
-) -> Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]:
+) -> TaskHandler:
     """Build a TaskHandler that proxies CALLs to an OpenAI-compatible server.
 
     Arguments:
@@ -61,69 +52,10 @@ def openai_compat_handler(
         `{result: <upstream JSON>}` on success OR
         `{error_code: int, error_message: str}` on failure.
     """
-    base = base_url.rstrip("/")
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-
-    async def handler(task: dict[str, Any]) -> dict[str, Any]:
-        intent = str(task.get("intent", ""))
-        payload = task.get("payload") or {}
-        if not isinstance(payload, dict):
-            return {
-                "error_code": 400,
-                "error_message": (
-                    f"openai_compat: task.payload must be a dict, got {type(payload).__name__}"
-                ),
-            }
-
-        path = _INTENT_TO_PATH.get(intent)
-        if path is None:
-            return {
-                "error_code": 400,
-                "error_message": (
-                    f"openai_compat: unsupported intent {intent!r}; "
-                    f"supported: {sorted(_INTENT_TO_PATH.keys())}"
-                ),
-            }
-
-        # Merge model: explicit task payload field wins; factory default fills in.
-        body = dict(payload)
-        body.setdefault("model", model)
-        if not body.get("model"):
-            return {
-                "error_code": 400,
-                "error_message": (
-                    "openai_compat: no model — either pass `model=...` to "
-                    "openai_compat_handler(...) or include `model` in the task payload"
-                ),
-            }
-
-        try:
-            async with httpx.AsyncClient(timeout=timeout_s, headers=headers) as client:
-                r = await client.post(f"{base}{path}", json=body)
-        except httpx.TimeoutException:
-            return {"error_code": 408, "error_message": "openai_compat: backend timed out"}
-        except httpx.HTTPError as exc:
-            return {
-                "error_code": 502,
-                "error_message": f"openai_compat: HTTP transport error: {exc}",
-            }
-
-        if r.status_code >= 400:
-            # Surface the upstream error verbatim — operators usually need the
-            # original message (rate-limit, model-not-loaded, etc.)
-            return {
-                "error_code": r.status_code,
-                "error_message": f"openai_compat: upstream {r.status_code}: {r.text[:512]}",
-            }
-
-        try:
-            data = r.json()
-        except ValueError as exc:
-            return {
-                "error_code": 502,
-                "error_message": f"openai_compat: upstream returned non-JSON: {exc}",
-            }
-
-        return {"result": data}
-
-    return handler
+    return build_openai_dialect_handler(
+        engine="openai_compat",
+        base_url=base_url,
+        model=model,
+        api_key=api_key,
+        timeout_s=timeout_s,
+    )

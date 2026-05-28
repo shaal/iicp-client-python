@@ -203,3 +203,65 @@ async def test_base_url_trailing_slash_normalized():
         }
     )
     assert "error_code" not in result
+
+
+# ── Dedicated backends (vLLM / llama.cpp) + selector — parity Block B ───────
+
+
+from iicp_client.backends import (  # noqa: E402
+    BACKEND_TYPES,
+    get_backend_handler,
+    llamacpp_handler,
+    vllm_handler,
+)
+
+
+@respx.mock
+async def test_vllm_handler_defaults_to_port_8000():
+    route = respx.post("http://localhost:8000/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json={"choices": []})
+    )
+    handler = vllm_handler(model="mistral-7b")
+    result = await handler(
+        {"intent": "urn:iicp:intent:llm:chat:v1", "payload": {"messages": []}}
+    )
+    assert route.calls.call_count == 1
+    assert "error_code" not in result
+
+
+@respx.mock
+async def test_llamacpp_handler_defaults_to_port_8080():
+    route = respx.post("http://localhost:8080/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json={"choices": []})
+    )
+    handler = llamacpp_handler(model="gguf-model")
+    result = await handler(
+        {"intent": "urn:iicp:intent:llm:chat:v1", "payload": {"messages": []}}
+    )
+    assert route.calls.call_count == 1
+    assert "error_code" not in result
+
+
+async def test_vllm_error_message_uses_engine_label():
+    handler = vllm_handler(model="m")
+    result = await handler({"intent": "urn:iicp:intent:bogus:v1", "payload": {}})
+    assert result["error_code"] == 400
+    assert result["error_message"].startswith("vllm:")
+
+
+class TestSelector:
+    def test_backend_types_lists_all_three(self):
+        assert set(BACKEND_TYPES) == {"openai_compat", "vllm", "llamacpp"}
+
+    def test_get_backend_handler_returns_callable(self):
+        assert callable(get_backend_handler("vllm", model="m"))
+        assert callable(get_backend_handler("llamacpp", model="m"))
+        assert callable(get_backend_handler("openai_compat", model="m"))
+
+    def test_get_backend_handler_unknown_raises(self):
+        try:
+            get_backend_handler("nope", model="m")
+        except ValueError as exc:
+            assert "unknown backend_type" in str(exc)
+        else:
+            raise AssertionError("expected ValueError for unknown backend_type")

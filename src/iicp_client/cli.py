@@ -33,7 +33,7 @@ import uuid
 from dataclasses import dataclass as _dc
 
 from iicp_client import IicpNode, NodeConfig
-from iicp_client.backends import openai_compat_handler
+from iicp_client.backends import BACKEND_TYPES, get_backend_handler
 from iicp_client.identity import (
     NodeIdentity,
     OperatorIdentity,
@@ -80,6 +80,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=_env("IICP_BACKEND_URL"),
         help="OpenAI-compatible backend URL (Ollama / vLLM / LM Studio). "
         "env: IICP_BACKEND_URL",
+    )
+    serve.add_argument(
+        "--backend-type",
+        default=_env("IICP_BACKEND_TYPE", "openai_compat"),
+        choices=list(BACKEND_TYPES),
+        help="Inference backend engine. env: IICP_BACKEND_TYPE",
     )
     serve.add_argument(
         "--model",
@@ -276,7 +282,8 @@ async def _serve(args: argparse.Namespace) -> int:
     base_url = args.backend_url.rstrip("/")
     if not base_url.endswith("/v1"):
         base_url = base_url + "/v1"
-    handler = openai_compat_handler(
+    handler = get_backend_handler(
+        args.backend_type,
         base_url=base_url,
         model=args.model,
     )
