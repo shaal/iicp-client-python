@@ -221,6 +221,8 @@ class IicpNode:
             persist_path=(
                 Path(config.peer_persist_path) if config.peer_persist_path else None
             ),
+            relay_capable=config.relay_capable,
+            relay_accept_port=config.relay_accept_port,
         )
         self._nonces: dict[str, float] = {}
         self._nonces_lock = threading.Lock()
@@ -782,7 +784,7 @@ class IicpNode:
             bg_tasks.append(asyncio.create_task(self._pinhole_renewal_loop()))
         if self._cfg.enable_mesh:
             # Phase 2 mesh: bootstrap from the directory then gossip every 30s.
-            await self._peer_manager.start(self._cfg.node_id)
+            await self._peer_manager.start(self._cfg.node_id, own_endpoint=self._cfg.endpoint)
             bg_tasks.append(asyncio.create_task(self._peer_manager.gossip_loop()))
         # R1: start RelayAcceptServer when this node is relay-capable (#341).
         # Workers behind CGNAT connect here to bind outbound relay sessions.

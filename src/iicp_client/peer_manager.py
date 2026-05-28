@@ -19,6 +19,7 @@ call from server threads, so the peer store is guarded by a threading.Lock.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import random
@@ -45,6 +46,8 @@ class PeerManager:
         directory_url: str,
         node_token: str = "",
         persist_path: Path | None = None,
+        relay_capable: bool = False,
+        relay_accept_port: int = 9485,
     ) -> None:
         self._directory_url = directory_url.rstrip("/")
         self._node_token = node_token
@@ -52,6 +55,10 @@ class PeerManager:
         self._peers: dict[str, dict] = {}
         self._own_id = ""
         self._lock = threading.Lock()
+        # R3: own relay info advertised in gossip exchanges
+        self._relay_capable = relay_capable
+        self._relay_accept_port = relay_accept_port
+        self._own_endpoint: str = ""
 
     # ── accessors used by the HTTP handlers (sync, thread-safe) ──────────────
 
@@ -80,10 +87,61 @@ class PeerManager:
                     "region": p.get("region", ""),
                     "last_seen": p.get("last_seen", ""),
                     "last_contact": now,
+                    # R3: relay election fields — advertised in gossip exchange
+                    "relay_capable": bool(p.get("relay_capable", False)),
+                    "relay_accept_port": int(p.get("relay_accept_port", 9485)),
+                    "relay_load": float(p.get("relay_load", 0.0)),
                 }
         if added:
             self._persist()
         return added
+
+    def get_relay_candidates(self) -> list[dict]:
+        """Return known peers that are relay-capable, by descending relay score.
+
+        Used by elect_relay() to pick the best available relay for a worker
+        behind CGNAT. Peers must be relay_capable=True and have a non-empty
+        endpoint (used to derive the relay accept host).
+        """
+        with self._lock:
+            candidates = [
+                p for p in self._peers.values()
+                if p.get("relay_capable") and p.get("endpoint")
+            ]
+        return candidates
+
+    def elect_relay(self, worker_id: str) -> dict | None:
+        """R3: deterministic relay election for a CGNAT worker.
+
+        Algorithm:
+        1. Collect relay-capable peers.
+        2. Rank by relay_load ascending (least-loaded first).
+        3. Tiebreak by HMAC(worker_id + relay_id) so the same worker always
+           maps to the same relay (stable hashing), distributing workers across
+           relay pool uniformly.
+        4. Return the top candidate, or None if no relay is available.
+
+        The elected relay's accept host is derived from the endpoint URL
+        (same host, relay_accept_port). Callers should use
+        :class:`~iicp_client.relay_worker_client.RelayWorkerClient` with the
+        returned (host, port) to bind.
+        """
+        import urllib.parse
+        candidates = self.get_relay_candidates()
+        if not candidates:
+            return None
+
+        def _score(peer: dict) -> tuple:
+            load = peer.get("relay_load", 0.0)
+            h = hashlib.sha256(f"{worker_id}:{peer['node_id']}".encode()).hexdigest()
+            return (load, h)  # min-load, tiebreak by hash
+
+        elected = min(candidates, key=_score)
+        # Derive relay accept host from endpoint URL
+        parsed = urllib.parse.urlparse(elected["endpoint"])
+        relay_host = parsed.hostname or parsed.path
+        relay_port = elected.get("relay_accept_port", 9485)
+        return {**elected, "_relay_host": relay_host, "_relay_port": relay_port}
 
     def prune(self) -> int:
         """Drop peers not contacted within the expiry window. Returns count pruned."""
@@ -104,8 +162,9 @@ class PeerManager:
 
     # ── lifecycle ───────────────────────────────────────────────────────────
 
-    async def start(self, node_id: str) -> None:
+    async def start(self, node_id: str, own_endpoint: str = "") -> None:
         self._own_id = node_id
+        self._own_endpoint = own_endpoint
         self._load_persisted()
         await self._bootstrap()
 
@@ -145,8 +204,17 @@ class PeerManager:
 
     async def _exchange(self, target: dict) -> None:
         with self._lock:
-            known = list(self._peers.keys())
-        body = json.dumps({"known_peers": known}).encode()
+            known_peers = list(self._peers.values())
+        # R3: include own relay capabilities so recipients can elect us as a relay.
+        if self._own_id:
+            known_peers.append({
+                "node_id": self._own_id,
+                "endpoint": self._own_endpoint,
+                "relay_capable": self._relay_capable,
+                "relay_accept_port": self._relay_accept_port,
+                "relay_load": 0.0,
+            })
+        body = json.dumps({"known_peers": known_peers}).encode()
         headers = {"Content-Type": "application/json"}
         if self._node_token:
             headers["X-IICP-Signature"] = sign_body(body, self._node_token)
