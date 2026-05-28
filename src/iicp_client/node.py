@@ -810,6 +810,44 @@ class IicpNode:
             _relay_host, _, _relay_port_str = relay_worker_ep.rpartition(":")
             _relay_host = _relay_host or relay_worker_ep
             _relay_port_n = int(_relay_port_str) if _relay_port_str.isdigit() else 9485
+            _node_ref = self  # capture for on_bind callback
+            _current_token: list[str | None] = [node_token]
+
+            async def _on_relay_bind(rhost: str, rport: int, worker_id: str) -> None:
+                """Re-register with the directory advertising the relay as our endpoint.
+
+                After a successful RELAY_BIND the relay becomes our public endpoint.
+                We deregister the old (private) endpoint and register a new one with
+                transport_method='turn_relay' and endpoint=<relay_host>:<relay_port>.
+                This makes the node appear ACTIVE in directory + stats (#358).
+                """
+                new_endpoint = f"http://{rhost}:{rport}"
+                # Update config so register() uses the relay endpoint
+                _node_ref._cfg.endpoint = new_endpoint
+                _node_ref._cfg.transport_method = "turn_relay"
+                _node_ref._cfg.transport_metadata = {
+                    "relay_for": worker_id,
+                    "relay_host": rhost,
+                    "relay_port": rport,
+                }
+                # Deregister old token, then register with relay endpoint
+                old_token = _current_token[0]
+                if old_token:
+                    try:
+                        await _node_ref.deregister(old_token)
+                        logger.info("Relay worker: deregistered old endpoint")
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("Relay worker: deregister failed: %s", exc)
+                try:
+                    new_token = await _node_ref.register()
+                    _current_token[0] = new_token
+                    logger.info(
+                        "Relay worker: re-registered with relay endpoint %s (token=%s…)",
+                        new_endpoint, (new_token or "")[:8],
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Relay worker: re-registration failed: %s", exc)
+
             from iicp_client.relay_worker_client import RelayWorkerClient
             relay_worker = RelayWorkerClient(
                 worker_id=self._cfg.node_id,
@@ -818,6 +856,7 @@ class IicpNode:
                 relay_port=_relay_port_n,
                 task_handler=handler,
                 models=[self._cfg.model] if self._cfg.model else [],
+                on_bind=_on_relay_bind,
             )
             bg_tasks.append(asyncio.create_task(relay_worker.run()))
             logger.info("Relay worker started → %s:%d", _relay_host, _relay_port_n)
