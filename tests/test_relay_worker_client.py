@@ -11,15 +11,12 @@ import pytest
 from iicp_client.relay_worker_client import (
     _HEADER_LEN,
     _IICP_MAGIC,
-    _MT_CALL,
     _MT_PING,
-    _MT_PONG,
     _MT_RESPONSE,
     RelayWorkerClient,
     _make_frame,
     _read_frame,
 )
-
 
 # ── frame encoding helpers ────────────────────────────────────────────────────
 
@@ -109,7 +106,9 @@ class TestRelayWorkerClientInit:
 class TestHandleCall:
     @pytest.mark.asyncio
     async def test_handler_result_encoded_in_response(self):
-        import cbor2, json as _json
+        import json as _json
+
+        import cbor2
 
         received_responses = []
 
@@ -129,7 +128,9 @@ class TestHandleCall:
             relay_port=9,
             task_handler=my_handler,
         )
-        call_payload = cbor2.dumps({15: "call-abc", 5: _json.dumps({"question": "??"}).encode()}, canonical=True)
+        call_payload = cbor2.dumps(
+            {15: "call-abc", 5: _json.dumps({"question": "??"}).encode()}, canonical=True
+        )
         writer = FakeWriter()
         await client._handle_call(call_payload, writer)
         assert len(received_responses) == 1

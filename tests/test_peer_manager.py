@@ -103,8 +103,7 @@ class TestRelayElection:
         pm = self._pm_with_relays()
         elected = pm.elect_relay("worker-001")
         assert elected is not None
-        # relay-b has lower load (0.1 vs 0.2) → should be elected when hash tiebreak doesn't override
-        # (relay-b always wins because it has strictly lower load)
+        # relay-b load=0.1 < relay-a load=0.2 → always wins (load beats hash tiebreak)
         assert elected["node_id"] == "relay-b"
 
     def test_elect_relay_is_deterministic(self):
@@ -136,7 +135,10 @@ class TestRelayElection:
 
     def test_relay_capable_stored_in_merge(self):
         pm = _pm()
-        pm.merge_peers([{"node_id": "r", "endpoint": "http://r:8020", "relay_capable": True, "relay_accept_port": 9485}])
+        pm.merge_peers([{
+            "node_id": "r", "endpoint": "http://r:8020",
+            "relay_capable": True, "relay_accept_port": 9485,
+        }])
         peer = pm.relay_target("r")
         assert peer is not None
         assert peer.get("relay_capable") is True

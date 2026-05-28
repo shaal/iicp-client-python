@@ -537,7 +537,8 @@ class IicpNode:
                         self._json_response(200, resp_body)
                     except Exception as exc:  # noqa: BLE001
                         err = json.dumps(
-                            {"error": {"code": "IICP-E031", "message": f"relay session forward failed: {exc}"}}
+                            {"error": {"code": "IICP-E031",
+                                       "message": f"relay session forward failed: {exc}"}}
                         ).encode()
                         self._json_response(502, err)
                     return
@@ -545,8 +546,9 @@ class IicpNode:
                 # Fall back to HTTP forwarding for routable peers (ADR-022).
                 target = node._peer_manager.relay_target(target_id)
                 if target is None:
+                    _msg = "target not in peer list and not a bound relay worker"
                     err = json.dumps(
-                        {"error": {"code": "IICP-E030", "message": "target not in peer list and not a bound relay worker"}}
+                        {"error": {"code": "IICP-E030", "message": _msg}}
                     ).encode()
                     self._json_response(404, err)
                     return
@@ -802,7 +804,9 @@ class IicpNode:
                 ))
                 logger.info("Relay accept server started on %s:%d", host, relay_port)
             except Exception as exc:  # noqa: BLE001
-                logger.warning("Relay accept server failed to start: %s — relay sessions disabled", exc)
+                logger.warning(
+                    "Relay accept server failed to start: %s — relay sessions disabled", exc
+                )
 
         # R2: if relay_worker_endpoint is configured, connect outbound to a relay.
         # This node acts as a relay worker — its tasks are routed through the relay

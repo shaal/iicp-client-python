@@ -4,30 +4,26 @@
 from __future__ import annotations
 
 import asyncio
-import struct
-import unittest
-from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
+from unittest.mock import AsyncMock, MagicMock
 
 from iicp_client.iicp_tcp import (
     MsgType,
     decode_relay_bind,
+    decode_relay_response,
     encode_relay_ack,
     encode_relay_bind,
     encode_relay_call,
-    decode_relay_response,
-    IicpFrame,
 )
 from iicp_client.relay_session import RelaySessionRegistry, RelayWorkerSession
-
 
 # ── encode/decode helpers ──────────────────────────────────────────────────────
 
 
 class TestRelayFrameHelpers:
     def test_encode_decode_relay_bind_roundtrip(self):
-        raw = encode_relay_bind("w-001", "urn:iicp:intent:llm:chat:v1", ["qwen2.5:0.5b", "phi3:mini"])
+        raw = encode_relay_bind(
+            "w-001", "urn:iicp:intent:llm:chat:v1", ["qwen2.5:0.5b", "phi3:mini"]
+        )
         worker_id, intent, models = decode_relay_bind(raw)
         assert worker_id == "w-001"
         assert intent == "urn:iicp:intent:llm:chat:v1"
@@ -42,14 +38,18 @@ class TestRelayFrameHelpers:
 
     def test_encode_relay_call_contains_call_id_and_payload(self):
         raw = encode_relay_call("call-abc", {"messages": []})
-        import cbor2, json
+        import json
+
+        import cbor2
         body = cbor2.loads(raw)
         assert body[15] == "call-abc"
         payload = json.loads(body[5])
         assert "messages" in payload
 
     def test_decode_relay_response_extracts_call_id_and_result(self):
-        import cbor2, json
+        import json
+
+        import cbor2
         result = {"choices": [{"message": {"content": "hi"}}]}
         raw = cbor2.dumps({15: "call-abc", 5: json.dumps(result).encode()}, canonical=True)
         call_id, decoded = decode_relay_response(raw)

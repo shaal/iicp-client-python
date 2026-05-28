@@ -32,7 +32,8 @@ import asyncio
 import json
 import logging
 import struct
-from typing import Any, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -161,10 +162,13 @@ class RelayWorkerClient:
 
     async def _session(self) -> None:
         reader, writer = await asyncio.open_connection(self._relay_host, self._relay_port)
-        logger.debug("Relay worker %s: connected to %s:%d", self._worker_id, self._relay_host, self._relay_port)
+        logger.debug(
+            "Relay worker %s: connected to %s:%d",
+            self._worker_id, self._relay_host, self._relay_port,
+        )
         try:
             await self._handshake(reader, writer)
-        except Exception as exc:
+        except Exception:
             writer.close()
             await writer.wait_closed()
             raise
