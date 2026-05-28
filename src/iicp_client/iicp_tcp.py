@@ -49,7 +49,10 @@ _MAX_PAYLOAD = 16 * 1024 * 1024  # 16 MiB
 
 
 class MsgType(IntEnum):
-    """spec/iicp-framing.md §3 — core message types 0x01–0x0E."""
+    """spec/iicp-framing.md §3 — core message types 0x01–0x0E.
+
+    0x0B–0x0C are reserved for relay-as-last-resort (ADR-041 tier-3, #341 R1).
+    """
 
     INIT = 0x01
     ACK = 0x02
@@ -61,6 +64,9 @@ class MsgType(IntEnum):
     FEEDBACK = 0x08
     PING = 0x09
     PONG = 0x0A
+    # R1 relay-as-last-resort: worker binds outbound session to relay
+    RELAY_BIND = 0x0B
+    RELAY_ACK = 0x0C
 
 
 # ── Frame ─────────────────────────────────────────────────────────────────────
@@ -139,6 +145,54 @@ def encode_pong(echo: bytes | None = None) -> bytes:
     return encode_cbor(payload)
 
 
+def encode_relay_bind(worker_id: str, intent: str, models: list[str]) -> bytes:
+    """R1: worker → relay. Registers this TCP session as a relay channel."""
+    return encode_cbor({1: worker_id, 2: intent, 3: models})
+
+
+def decode_relay_bind(data: bytes) -> tuple[str, str, list[str]]:
+    """Returns (worker_id, intent, models) from a RELAY_BIND payload."""
+    body = decode_cbor(data)
+    if not isinstance(body, dict):
+        raise ValueError("RELAY_BIND payload must be a CBOR map")
+    worker_id = str(body.get(1, ""))
+    intent = str(body.get(2, ""))
+    models = [str(m) for m in body.get(3, [])] if isinstance(body.get(3), list) else []
+    return worker_id, intent, models
+
+
+def encode_relay_ack(worker_id: str) -> bytes:
+    """R1: relay → worker. Confirms RELAY_BIND accepted."""
+    return encode_cbor({1: "ok", 2: worker_id})
+
+
+def encode_relay_call(call_id: str, task: dict) -> bytes:
+    """R1: relay → worker. Push a task down the bound channel."""
+    return encode_cbor({15: call_id, 5: json.dumps(task).encode()})
+
+
+def decode_relay_response(data: bytes) -> tuple[str, dict]:
+    """R1: worker → relay RESPONSE for a pushed CALL. Returns (call_id, result)."""
+    body = decode_cbor(data)
+    if not isinstance(body, dict):
+        raise ValueError("RELAY RESPONSE must be a CBOR map")
+    call_id = str(body.get(15, ""))
+    raw5 = body.get(5, b"")
+    if isinstance(raw5, bytes):
+        try:
+            result = json.loads(raw5)
+        except Exception:  # noqa: BLE001
+            result = {"error": "bad payload"}
+    elif isinstance(raw5, str):
+        try:
+            result = json.loads(raw5)
+        except Exception:  # noqa: BLE001
+            result = {"error": "bad payload"}
+    else:
+        result = {}
+    return call_id, result
+
+
 def encode_response(
     session_id: str,
     call_id: str | None = None,
@@ -204,6 +258,7 @@ class IicpTcpServer:
         handler: TcpTaskHandler | None = None,
         discover_lookup: DiscoverLookup | None = None,
         concurrency_gate: object | None = None,
+        relay_registry: object | None = None,
     ) -> None:
         self.host = host
         self.port = port
@@ -216,6 +271,11 @@ class IicpTcpServer:
         # (IICP-E021). Same primitive the HTTP /v1/task path uses, so the
         # directory's NodeScorer sees back-pressure from either transport.
         self.concurrency_gate = concurrency_gate
+        # R1: optional RelaySessionRegistry — when set, incoming RELAY_BIND
+        # frames from workers are registered here and the session loop switches
+        # into relay-worker mode (forwarding CALL frames, routing RESPONSE
+        # frames back to waiting HTTP relay handlers).
+        self.relay_registry = relay_registry
         self._server: asyncio.AbstractServer | None = None
 
     async def start(self) -> None:
@@ -331,6 +391,8 @@ class IicpTcpServer:
             return False  # graceful shutdown requested by peer
         if mt == MsgType.FEEDBACK:
             return True
+        if mt == MsgType.RELAY_BIND:
+            return await self._on_relay_bind(frame, writer)
         logger.debug("Unhandled msg_type %s — ignoring", mt.name)
         return True
 
@@ -484,6 +546,17 @@ class IicpTcpServer:
         writer.write(resp.encode())
         await writer.drain()
         return True
+
+    async def _on_relay_bind(self, frame: IicpFrame, writer: asyncio.StreamWriter) -> bool:
+        """R1: RELAY_BIND on the IICP-TCP task port.
+
+        Workers must connect to the RelayAcceptServer (relay_session.py, port 9485)
+        instead. Refuse gracefully here to avoid protocol confusion.
+        """
+        logger.warning("RELAY_BIND on IICP-TCP task port — use RelayAcceptServer port")
+        writer.write(IicpFrame.make(MsgType.CLOSE, b"").encode())
+        await writer.drain()
+        return False
 
 
 # ── Client ────────────────────────────────────────────────────────────────────

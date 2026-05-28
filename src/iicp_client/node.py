@@ -127,6 +127,9 @@ class NodeConfig:
     # When True, serve() exposes POST /v1/relay to forward tasks to unreachable
     # peers learned via gossip (ADR-022). Requires enable_mesh.
     relay_capable: bool = False
+    # Port for the RelayAcceptServer (R1 relay-as-last-resort, #341).
+    # Workers behind CGNAT connect outbound to this port and send RELAY_BIND.
+    relay_accept_port: int = 9485
     # Optional path to persist the peer list across restarts.
     peer_persist_path: str | None = None
 
@@ -218,6 +221,11 @@ class IicpNode:
         self._nonces: dict[str, float] = {}
         self._nonces_lock = threading.Lock()
         self._metrics = _get_metrics()
+        # R1 relay-as-last-resort (#341): session registry populated when
+        # RelayAcceptServer is started by serve(). HTTP /v1/relay checks here
+        # first before falling back to HTTP peer forwarding.
+        from iicp_client.relay_session import RelaySessionRegistry
+        self._relay_sessions = RelaySessionRegistry()
         # ADR-019: HMAC key for signing pricing declarations. Initialized from
         # NodeConfig.node_hmac_key; overwritten from the directory's response
         # on register() so subsequent re-registrations (after expiry) sign
@@ -508,10 +516,31 @@ class IicpNode:
                 if not target_id or not task:
                     self.send_error(422, "target_node_id and task are required")
                     return
+
+                # R1: check relay session registry first (CGNAT workers with no
+                # inbound endpoint bind here via RelayAcceptServer, not HTTP).
+                relay_session = node._relay_sessions.get(target_id)
+                if relay_session is not None:
+                    try:
+                        result = asyncio.run_coroutine_threadsafe(
+                            relay_session.forward_task(task, timeout=120.0), loop
+                        ).result(timeout=125)
+                        resp_body = json.dumps(
+                            {"task_id": task.get("task_id", ""), "status": "completed", **result}
+                        ).encode()
+                        self._json_response(200, resp_body)
+                    except Exception as exc:  # noqa: BLE001
+                        err = json.dumps(
+                            {"error": {"code": "IICP-E031", "message": f"relay session forward failed: {exc}"}}
+                        ).encode()
+                        self._json_response(502, err)
+                    return
+
+                # Fall back to HTTP forwarding for routable peers (ADR-022).
                 target = node._peer_manager.relay_target(target_id)
                 if target is None:
                     err = json.dumps(
-                        {"error": {"code": "IICP-E030", "message": "target not in peer list"}}
+                        {"error": {"code": "IICP-E030", "message": "target not in peer list and not a bound relay worker"}}
                     ).encode()
                     self._json_response(404, err)
                     return
@@ -751,6 +780,23 @@ class IicpNode:
             # Phase 2 mesh: bootstrap from the directory then gossip every 30s.
             await self._peer_manager.start(self._cfg.node_id)
             bg_tasks.append(asyncio.create_task(self._peer_manager.gossip_loop()))
+        # R1: start RelayAcceptServer when this node is relay-capable (#341).
+        # Workers behind CGNAT connect here to bind outbound relay sessions.
+        relay_accept_srv = None
+        if self._cfg.relay_capable:
+            from iicp_client.relay_session import RelayAcceptServer
+            relay_port = getattr(self._cfg, "relay_accept_port", 9485)
+            relay_accept_srv = RelayAcceptServer(
+                self._relay_sessions, host=host, port=relay_port
+            )
+            try:
+                await relay_accept_srv.start()
+                bg_tasks.append(asyncio.create_task(
+                    relay_accept_srv._server.serve_forever()  # type: ignore[union-attr]
+                ))
+                logger.info("Relay accept server started on %s:%d", host, relay_port)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Relay accept server failed to start: %s — relay sessions disabled", exc)
 
         try:
             await loop.run_in_executor(None, server.serve_forever)
