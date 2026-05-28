@@ -204,24 +204,36 @@ async def detect_nat(
         return t0
 
     # Tier 1 — UPnP
-    ports_to_map: list[int] = [bind_port]
-    if transport_port and transport_port != bind_port:
-        ports_to_map.append(transport_port)
-
-    try:
-        upnp = await asyncio.wait_for(
-            _try_upnp_mapping(ports_to_map, lease_seconds=upnp_lease_seconds),
-            timeout=timeout_s,
+    # Skip UPnP when running inside a Docker bridge-networked container:
+    # the UPnP request reaches Docker's internal NAT, not the home router.
+    # Operators should either use --network host or set IICP_PUBLIC_ENDPOINT.
+    if _is_container_bridge_network():
+        profile.detection_log.append(
+            "tier-1: skipping UPnP — running inside Docker/K8s bridge network "
+            "(UPnP would reach container NAT, not home router). "
+            "Use IICP_PUBLIC_ENDPOINT=<host-or-external-ip>:<port> to override, "
+            "or run with --network host to enable UPnP."
         )
-    except TimeoutError:
-        profile.detection_log.append(f"tier-1: UPnP discovery timed out after {timeout_s}s")
         upnp = None
-    except ImportError as exc:
-        profile.detection_log.append(f"tier-1: upnp library not installed: {exc}")
-        upnp = None
-    except Exception as exc:  # noqa: BLE001
-        profile.detection_log.append(f"tier-1: UPnP error: {exc}")
-        upnp = None
+    else:
+        ports_to_map: list[int] = [bind_port]
+        if transport_port and transport_port != bind_port:
+            ports_to_map.append(transport_port)
+
+        try:
+            upnp = await asyncio.wait_for(
+                _try_upnp_mapping(ports_to_map, lease_seconds=upnp_lease_seconds),
+                timeout=timeout_s,
+            )
+        except TimeoutError:
+            profile.detection_log.append(f"tier-1: UPnP discovery timed out after {timeout_s}s")
+            upnp = None
+        except ImportError as exc:
+            profile.detection_log.append(f"tier-1: upnp library not installed: {exc}")
+            upnp = None
+        except Exception as exc:  # noqa: BLE001
+            profile.detection_log.append(f"tier-1: UPnP error: {exc}")
+            upnp = None
 
     if upnp and upnp.success:
         # External-IP probe fallback for routers that AddPortMapping but refuse
@@ -724,6 +736,58 @@ def _detect_local_ip_for_default_gateway() -> str:
         return "127.0.0.1"
     finally:
         s.close()
+
+
+def _is_container_bridge_network() -> bool:
+    """Detect if running inside a Docker/Kubernetes container on a bridge network.
+
+    Bridge-networked containers (the Docker default) are behind Docker's NAT,
+    which means UPnP requests reach the Docker engine's NAT, NOT the home
+    router. UPnP port mapping from inside a bridge container therefore maps
+    a port on the container network, not the external-facing router.
+
+    Returns True when the code is running inside a container on a bridge
+    network (UPnP should be skipped). Returns False for:
+      - Host-networking containers (share host namespace, UPnP works)
+      - Bare-metal / VPS (not containerized)
+      - Kubernetes pods via host networking
+
+    Detection heuristics (layered):
+      1. /.dockerenv exists → likely inside Docker
+      2. KUBERNETES_SERVICE_HOST env set → Kubernetes pod
+      3. Default-route IP falls in 172.16–31.x.x (Docker default bridge)
+    """
+    import os
+    import pathlib
+
+    # Fast path: IICP_PUBLIC_ENDPOINT explicitly set → operator knows their env
+    if os.environ.get("IICP_PUBLIC_ENDPOINT") or os.environ.get("IICP_SKIP_UPNP"):
+        return False
+
+    in_docker = pathlib.Path("/.dockerenv").exists()
+    in_k8s = bool(os.environ.get("KUBERNETES_SERVICE_HOST"))
+
+    if not in_docker and not in_k8s:
+        return False
+
+    # Check if we're on a bridge network (172.17.x.x / 172.16-31.x.x)
+    local_ip = _detect_local_ip_for_default_gateway()
+    try:
+        addr = ipaddress.IPv4Address(local_ip)
+        # Docker default bridge: 172.17.0.0/16; custom bridges: other 172.16-31.x
+        if addr.is_private:
+            parts = local_ip.split(".")
+            if len(parts) == 4 and parts[0] == "172":
+                second = int(parts[1])
+                if 16 <= second <= 31:
+                    return True  # Docker bridge network
+            # 10.x.x.x could be K8s pod network
+            if parts[0] == "10":
+                return in_k8s  # K8s pod = True, generic 10.x VPN = unsure
+    except (ValueError, IndexError):
+        pass
+
+    return False
 
 
 def _detect_public_v4_on_interfaces() -> str | None:

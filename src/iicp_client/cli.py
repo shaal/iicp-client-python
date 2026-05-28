@@ -28,6 +28,7 @@ import logging
 import os
 import subprocess
 import sys
+import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass as _dc
@@ -262,15 +263,35 @@ async def _serve(args: argparse.Namespace) -> int:
             )
             node.apply_nat_profile(profile)
             # Tier ≥ 3 (unreachable/CGNAT with no IPv6 fallback) and no relay
-            # configured → automatically enable mesh so the node can discover
-            # relay-capable peers via gossip and elect one as a relay of last resort.
+            # configured → auto-elect a relay from the directory and configure it.
+            # This is the fully automatic relay-as-last-resort path.
             if getattr(profile, "tier", 0) >= 3 and not relay_worker_ep:
                 logger.info(
-                    "NAT tier=%d: no direct or IPv6 endpoint available. "
-                    "Enabling mesh + relay-seeking mode (will auto-elect relay after bootstrap).",
+                    "NAT tier=%d: no direct or IPv6 endpoint available — "
+                    "querying directory for relay-capable peers.",
                     profile.tier,
                 )
-                cfg.enable_mesh = True
+                elected_relay = await _auto_elect_relay(
+                    args.directory_url, cfg.intent, node_id
+                )
+                if elected_relay:
+                    relay_host, relay_port = elected_relay
+                    relay_worker_ep = f"{relay_host}:{relay_port}"
+                    cfg.relay_worker_endpoint = relay_worker_ep
+                    logger.info(
+                        "NAT: auto-elected relay %s:%d — node will register "
+                        "via relay when connection is established.",
+                        relay_host, relay_port,
+                    )
+                else:
+                    logger.warning(
+                        "NAT tier=%d: no relay-capable peers found in directory. "
+                        "Enabling mesh to discover relays via gossip. "
+                        "Set IICP_RELAY_WORKER_ENDPOINT=<host>:<port> to specify "
+                        "a relay manually.",
+                        profile.tier,
+                    )
+                    cfg.enable_mesh = True
         except Exception as exc:  # noqa: BLE001
             logger.warning("NAT detection failed: %s — continuing without it", exc)
     else:
@@ -341,6 +362,52 @@ async def _serve(args: argparse.Namespace) -> int:
     )
     await node.serve(handler, host=args.host, port=args.port, node_token=token)
     return 0
+
+
+async def _auto_elect_relay(
+    directory_url: str, intent: str, node_id: str
+) -> tuple[str, int] | None:
+    """Query the directory for relay-capable nodes and elect one deterministically.
+
+    Used when NAT detection returns tier≥3 (CGNAT with no usable IPv6 path).
+    Returns (relay_host, relay_port) or None if no relay-capable peer is found.
+    """
+    import hashlib
+    try:
+        url = f"{directory_url.rstrip('/')}/v1/discover"
+        with urllib.request.urlopen(  # noqa: S310
+            f"{url}?intent={urllib.parse.quote(intent)}&relay_capable=true",
+            timeout=5,
+        ) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("relay discovery failed: %s", exc)
+        return None
+
+    candidates = [
+        n for n in data.get("nodes", [])
+        if n.get("relay_capable") and n.get("endpoint")
+    ]
+    if not candidates:
+        return None
+
+    def _score(node: dict) -> tuple:
+        load = float(node.get("load", 0.0))
+        h = hashlib.sha256(f"{node_id}:{node['node_id']}".encode()).hexdigest()
+        return (load, h)
+
+    elected = min(candidates, key=_score)
+    endpoint = elected["endpoint"].rstrip("/")
+    # Derive relay host from HTTP endpoint URL
+    try:
+        parsed = urllib.parse.urlparse(endpoint)
+        relay_host = parsed.hostname or ""
+    except Exception:  # noqa: BLE001
+        relay_host = ""
+    relay_port = elected.get("relay_accept_port") or 9485
+    if not relay_host:
+        return None
+    return relay_host, int(relay_port)
 
 
 def _prompt(question: str, default: str = "") -> str:
