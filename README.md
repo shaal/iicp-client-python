@@ -135,6 +135,17 @@ async def main():
 asyncio.run(main())
 ```
 
+### Listen port — default 9484, auto-increment (v0.7.5+)
+
+The official IICP port **9484** is the default listen port (`IICP_PORT`, `--port`).
+The `iicp-node` CLI auto-increments to the next free port when 9484 is already in
+use, so you can run several nodes on one host without picking ports by hand — the
+first binds 9484, the second 9485, the third 9486, and so on. Each node gets its
+own port, hence its own NAT pinhole; multiple models served by one node share that
+single port. Auto-increment is skipped when you pass an explicit `--public-endpoint`
+(you own the port mapping in that case). `IicpNode.serve(port=…)` uses the port you
+give it as-is (no auto-increment at the library level).
+
 ---
 
 ## NAT traversal — automatic (v0.7.3+)

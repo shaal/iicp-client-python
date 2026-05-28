@@ -204,7 +204,7 @@ class IicpNode:
             max_concurrent=4,
         ))
         token = await node.register()
-        await node.serve(my_handler, port=8020, node_token=token)
+        await node.serve(my_handler, port=9484, node_token=token)
     """
 
     def __init__(self, config: NodeConfig) -> None:
@@ -468,7 +468,7 @@ class IicpNode:
         self,
         handler: TaskHandler,
         host: str = "0.0.0.0",
-        port: int = 8020,
+        port: int = 9484,
         node_token: str | None = None,
     ) -> None:
         """Start the task server (blocks until interrupted).
@@ -476,7 +476,7 @@ class IicpNode:
         Args:
             handler:    ``async def handler(task: dict) -> dict``
             host:       Bind address (default ``0.0.0.0``).
-            port:       Bind port (default 8020).
+            port:       Bind port (default 9484).
             node_token: If provided, starts a background heartbeat loop.
         """
         loop = asyncio.get_event_loop()

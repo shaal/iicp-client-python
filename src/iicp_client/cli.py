@@ -26,6 +26,7 @@ import asyncio
 import json
 import logging
 import os
+import socket
 import subprocess
 import sys
 import urllib.parse
@@ -51,6 +52,26 @@ logger = logging.getLogger("iicp-node")
 
 def _env(name: str, default: str | None = None) -> str | None:
     return os.environ.get(name, default)
+
+
+def _find_available_port(host: str, start: int, max_tries: int = 64) -> int:
+    """Return the first bindable TCP port >= ``start`` on ``host``.
+
+    The official IICP port 9484 is the starting point; when running multiple
+    nodes on one host (each model on its own port → its own pinhole) the second
+    node auto-increments to 9485, the third to 9486, and so on. Probes by
+    attempting a real bind so the chosen port is genuinely free before NAT
+    detection opens a pinhole and the directory registration advertises it.
+    """
+    bind_host = host if host not in ("", "0.0.0.0") else "0.0.0.0"
+    for candidate in range(start, start + max_tries):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            try:
+                probe.bind((bind_host, candidate))
+                return candidate
+            except OSError:
+                continue
+    return start  # exhausted — let serve() surface the real bind error
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -128,7 +149,7 @@ def _build_parser() -> argparse.ArgumentParser:
     serve.add_argument(
         "--port",
         type=int,
-        default=int(_env("IICP_PORT", "8020") or "8020"),
+        default=int(_env("IICP_PORT", "9484") or "9484"),
         help="HTTP listen port. env: IICP_PORT",
     )
     serve.add_argument(
@@ -208,7 +229,7 @@ async def _serve(args: argparse.Namespace) -> int:
         args.node_id = args.node_id or saved.node_id
         if args.max_concurrent == 4:
             args.max_concurrent = saved.max_concurrent
-        if args.port == 8020:
+        if args.port == 9484:
             args.port = saved.port
         if args.host == "0.0.0.0":
             args.host = saved.host
@@ -224,6 +245,21 @@ async def _serve(args: argparse.Namespace) -> int:
             "or load via `--node <name>` after `iicp-node init`).\n"
         )
         return 2
+
+    # Resolve the actual listen port before NAT detection: start at the
+    # requested port (default 9484, the official IICP port) and auto-increment
+    # to the next free port. This keeps one port per node (multiple models on
+    # one node share it) while N nodes on one host each get a distinct port →
+    # distinct pinhole. Skipped when the operator supplies an explicit
+    # --public-endpoint (they own the port mapping in that case).
+    if not args.public_endpoint:
+        resolved_port = _find_available_port(args.host, args.port)
+        if resolved_port != args.port:
+            logger.info(
+                "Port %d in use — auto-incremented to first free port %d.",
+                args.port, resolved_port,
+            )
+        args.port = resolved_port
 
     node_id = (args.node_id or str(uuid.uuid4()))[:36]
     public_endpoint = args.public_endpoint or f"http://localhost:{args.port}"
@@ -467,7 +503,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
     intent = _prompt("Intent URN", "urn:iicp:intent:llm:chat:v1")
     region = _prompt("Region tag", "eu-central")
     directory_url = _prompt("Directory URL", "https://iicp.network/api")
-    port_str = _prompt("Local HTTP port", "8020")
+    port_str = _prompt("Local HTTP port", "9484")
     port = int(port_str)
     public_endpoint = _prompt(
         "Public endpoint URL (leave blank if you'll use --auto-detect-nat)",
