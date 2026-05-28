@@ -270,13 +270,29 @@ class IicpNode:
         # #343 — capture the IPv6 firewall pinhole UID if one was opened so
         # serve()'s finally block can revoke it on shutdown.
         ipv6 = getattr(profile, "ipv6", None)
-        if ipv6 is not None and getattr(ipv6, "pinhole_active", False):
-            uid = getattr(ipv6, "pinhole_unique_id", None)
-            if isinstance(uid, int):
-                self._pinhole_uid = uid
-            lease = getattr(ipv6, "pinhole_lease_seconds", None)
-            if isinstance(lease, int) and lease > 0:
-                self._pinhole_lease_seconds = lease
+        if ipv6 is not None:
+            if getattr(ipv6, "pinhole_active", False):
+                uid = getattr(ipv6, "pinhole_unique_id", None)
+                if isinstance(uid, int):
+                    self._pinhole_uid = uid
+                lease = getattr(ipv6, "pinhole_lease_seconds", None)
+                if isinstance(lease, int) and lease > 0:
+                    self._pinhole_lease_seconds = lease
+            elif getattr(ipv6, "global_v6_available", False):
+                # IPv6 is available but AddPinhole failed — advertised IPv6
+                # endpoint may not be reachable if router firewall blocks inbound.
+                # This is a common FRITZ!Box scenario (error 606 from router).
+                pub = getattr(profile, "public_endpoint", "")
+                if pub and pub.startswith("http://["):
+                    logger.warning(
+                        "NAT: IPv6 endpoint %s advertised but firewall pinhole "
+                        "could not be opened (router rejected AddPinhole). "
+                        "IPv4 clients cannot reach this node; IPv6 clients may work "
+                        "if your router allows inbound TCP (FRITZ!Box: Network → "
+                        "Firewall → IPv6). Alternatively use IICP_RELAY_WORKER_ENDPOINT "
+                        "for relay-as-last-resort fallback.",
+                        pub,
+                    )
         # Surface a small dict of detection metadata so directory operators can
         # see what tier the SDK landed on without us shipping every detail.
         tier = getattr(profile, "tier", None)

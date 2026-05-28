@@ -145,17 +145,21 @@ def _build_parser() -> argparse.ArgumentParser:
     serve.add_argument(
         "--auto-detect-nat",
         action="store_true",
-        default=(_env("IICP_AUTO_DETECT_NAT", "false") or "false").lower() == "true",
+        # Default ON: auto-detection runs unless operator explicitly sets
+        # --public-endpoint or disables via IICP_AUTO_DETECT_NAT=false.
+        default=(_env("IICP_AUTO_DETECT_NAT", "true") or "true").lower() != "false",
         help="Run detect_nat() at startup to claim a public endpoint via "
         "UPnP / external-IP probe. Overrides --public-endpoint when a higher-"
-        "tier endpoint is discovered. env: IICP_AUTO_DETECT_NAT",
+        "tier endpoint is discovered. Default: ON. env: IICP_AUTO_DETECT_NAT",
     )
     serve.add_argument(
         "--external-ip-probe-url",
-        default=_env("IICP_EXTERNAL_IP_PROBE_URL"),
-        help="Optional HTTPS URL returning the operator's public IPv4 in plain "
-        "text (e.g. https://api.ipify.org). Used as fallback when UPnP "
-        "discovery succeeds but GetExternalIPAddress is auth-gated. "
+        # Default to a well-known stable external IP probe URL so CGNAT detection
+        # and UPnP external-IP fallback work without operator configuration.
+        default=_env("IICP_EXTERNAL_IP_PROBE_URL") or "https://api.ipify.org",
+        help="HTTPS URL returning the operator's public IPv4 in plain text. "
+        "Used as fallback when UPnP succeeds but GetExternalIPAddress is "
+        "auth-gated (common on FRITZ!Box). Default: https://api.ipify.org. "
         "env: IICP_EXTERNAL_IP_PROBE_URL",
     )
     serve.add_argument(
@@ -257,6 +261,16 @@ async def _serve(args: argparse.Namespace) -> int:
                 getattr(profile, "public_endpoint", None) or "(none)",
             )
             node.apply_nat_profile(profile)
+            # Tier ≥ 3 (unreachable/CGNAT with no IPv6 fallback) and no relay
+            # configured → automatically enable mesh so the node can discover
+            # relay-capable peers via gossip and elect one as a relay of last resort.
+            if getattr(profile, "tier", 0) >= 3 and not relay_worker_ep:
+                logger.info(
+                    "NAT tier=%d: no direct or IPv6 endpoint available. "
+                    "Enabling mesh + relay-seeking mode (will auto-elect relay after bootstrap).",
+                    profile.tier,
+                )
+                cfg.enable_mesh = True
         except Exception as exc:  # noqa: BLE001
             logger.warning("NAT detection failed: %s — continuing without it", exc)
     else:
