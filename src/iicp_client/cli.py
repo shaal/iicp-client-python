@@ -220,7 +220,7 @@ async def _serve(args: argparse.Namespace) -> int:
         )
         return 2
 
-    node_id = args.node_id or f"sdk-{args.model.replace(':', '-')}-{uuid.uuid4().hex[:8]}"
+    node_id = args.node_id or str(uuid.uuid4())
     public_endpoint = args.public_endpoint or f"http://localhost:{args.port}"
 
     relay_worker_ep: str | None = getattr(args, "relay_worker_endpoint", None)
