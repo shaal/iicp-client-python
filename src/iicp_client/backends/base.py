@@ -14,14 +14,14 @@ handler-factory style (tracker iicp.network#340; parity Block B).
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable, Coroutine
 from typing import Any
 
 import httpx
 
 logger = logging.getLogger(__name__)
 
-TaskHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
+TaskHandler = Callable[[dict[str, Any]], Coroutine[Any, Any, dict[str, Any]]]
 
 # Maps IICP intent URN → OpenAI-compatible HTTP path.
 INTENT_TO_PATH: dict[str, str] = {

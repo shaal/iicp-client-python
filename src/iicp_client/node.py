@@ -29,7 +29,7 @@ from typing import Any
 
 import httpx
 
-from iicp_client.availability import AvailabilityEvaluator
+from iicp_client.availability import AvailabilityEvaluator, Window
 from iicp_client.idempotency import IdempotencyGuard
 from iicp_client.peer_manager import PeerManager
 from iicp_client.scheduler import QUEUE_WAIT_S, is_queue_eligible
@@ -116,7 +116,7 @@ class NodeConfig:
     # `availability`). Each entry: {"start": "HH:MM", "end": "HH:MM", "share": 0.0-1.0}
     # in local time. Shapes the effective capacity advertised to the directory and
     # gated at serve time. None/empty → always full capacity. See availability.py.
-    availability_windows: list[dict] | None = None
+    availability_windows: list[Window] | None = None
     # ADR-010 task_id idempotency. Off by default to preserve the pre-0.6 contract
     # (a task_id may be resubmitted). When True, a duplicate task_id within the
     # 5-minute window is rejected with IICP-E010. See idempotency.py.

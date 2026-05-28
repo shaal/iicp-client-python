@@ -83,7 +83,7 @@ def task_validate_span(task_id: str) -> Generator[object, None, None]:
     """TRACE-01: iicp.task.validate — wraps request parsing and auth check."""
     _init()
     assert _tracer is not None
-    with _tracer.start_as_current_span("iicp.task.validate") as span:  # type: ignore[union-attr]
+    with _tracer.start_as_current_span("iicp.task.validate") as span:  # type: ignore[attr-defined]
         span.set_attribute("iicp.task_id", task_id)
         yield span
 
@@ -93,7 +93,7 @@ def task_execute_span(task_id: str, intent: str) -> Generator[object, None, None
     """TRACE-02: iicp.task.execute — wraps handler dispatch and response."""
     _init()
     assert _tracer is not None
-    with _tracer.start_as_current_span("iicp.task.execute") as span:  # type: ignore[union-attr]
+    with _tracer.start_as_current_span("iicp.task.execute") as span:  # type: ignore[attr-defined]
         span.set_attribute("iicp.task_id", task_id)
         span.set_attribute("iicp.intent", intent)
         yield span

@@ -488,6 +488,7 @@ class IicpTcpServer:
         if self.handler is None:
             error_code, error_message = 503, "no handler configured"
         else:
+            handler = self.handler  # local capture: keep non-None narrowing inside the closure
             task = {
                 "task_id": task_id,
                 "intent": intent,
@@ -508,7 +509,7 @@ class IicpTcpServer:
             async def _run_handler() -> None:
                 nonlocal result, error_code, error_message
                 try:
-                    handler_result = await self.handler(task)
+                    handler_result = await handler(task)
                     if isinstance(handler_result, dict):
                         if "error_code" in handler_result:
                             error_code = int(handler_result["error_code"])

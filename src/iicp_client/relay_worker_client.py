@@ -119,7 +119,7 @@ class RelayWorkerClient:
         relay_port: int,
         task_handler: TaskHandler,
         models: list[str] | None = None,
-        on_bind: Callable[[str, str, int], Awaitable[None]] | None = None,
+        on_bind: Callable[[str, int, str], Awaitable[None]] | None = None,
     ) -> None:
         """
         Args:

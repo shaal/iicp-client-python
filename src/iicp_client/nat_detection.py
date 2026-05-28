@@ -336,7 +336,7 @@ async def detect_nat(
         probed = await _probe_external_ip(external_ip_probe_url, timeout_s=min(timeout_s, 5.0))
         if probed:
             public_url = f"http://{probed}:{bind_port}"
-            transport_url: str | None = None
+            transport_url = None
             if transport_port and transport_port != bind_port:
                 transport_url = f"iicp://{probed}:{transport_port}"
             profile.detection_log.append(
@@ -407,9 +407,9 @@ async def _detect_external_tunnel(bind_port: int, timeout_s: float = 3.0) -> str
     import os as _os
 
     for env_var in ("IICP_TUNNEL_URL", "TUNNEL_URL", "CLOUDFLARE_TUNNEL_URL"):
-        url = _os.environ.get(env_var, "")
-        if url.startswith("https://"):
-            return url
+        env_url = _os.environ.get(env_var, "")
+        if env_url.startswith("https://"):
+            return env_url
 
     url = await _detect_ngrok_tunnel(bind_port, timeout_s=timeout_s)
     if url:
@@ -702,7 +702,7 @@ def _detect_local_ip_matching_igd(igd) -> str | None:
     try:
         host = socket.gethostname()
         for info in socket.getaddrinfo(host, None, socket.AF_INET):
-            addr = info[4][0]
+            addr = str(info[4][0])  # AF_INET sockaddr[0] is the host string
             if addr.startswith(igd_prefix):
                 return addr
     except OSError:
@@ -1026,7 +1026,7 @@ def _list_global_ipv6_addresses() -> list[str]:
     Filters out link-local (fe80::/10), unique-local (fc00::/7), loopback,
     multicast, and unspecified — only globally-routable 2000::/3 returned.
     """
-    found: set[str] = []
+    found: list[str] = []
     try:
         addrs = socket.getaddrinfo(socket.gethostname(), None, family=socket.AF_INET6)
     except OSError:
@@ -1034,7 +1034,7 @@ def _list_global_ipv6_addresses() -> list[str]:
     for fam, _stype, _proto, _canon, sockaddr in addrs:
         if fam != socket.AF_INET6:
             continue
-        ip = sockaddr[0].split("%")[0]  # strip zone-id (fe80::1%en0)
+        ip = str(sockaddr[0]).split("%")[0]  # strip zone-id (fe80::1%en0)
         try:
             addr = ipaddress.IPv6Address(ip)
         except ValueError:
