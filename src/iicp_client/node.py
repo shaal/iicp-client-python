@@ -97,6 +97,9 @@ class NodeConfig:
     transport_method: str | None = None
     nat_type: str | None = None
     transport_metadata: dict | None = None
+    # ADR-043 §9 (#344) — 8-category exposure_mode, derived via qualify_service in
+    # apply_nat_profile; surfaced to the directory nodes.exposure_mode column.
+    exposure_mode: str | None = None
     # S.12 §2.1 — CIP-D1 policy block surfaced to the directory's register
     # payload. When None, the SDK falls back to iicp_client.cip_policy.get_policy().
     # Operators with CIP-Provider mode enabled either pass a CooperativeInferencePolicy
@@ -267,6 +270,13 @@ class IicpNode:
         if tm and tm != "unreachable":
             self._cfg.transport_method = tm
         self._cfg.nat_type = self._cfg.nat_type or "unknown"
+        # ADR-043 §9 (#344) — derive the canonical 8-category exposure_mode.
+        try:
+            from iicp_client.qualify import qualify_service
+
+            self._cfg.exposure_mode = qualify_service(profile).exposure_mode
+        except Exception:
+            pass  # best-effort; exposure_mode stays None if qualification can't run
         # #343 — capture the IPv6 firewall pinhole UID if one was opened so
         # serve()'s finally block can revoke it on shutdown.
         ipv6 = getattr(profile, "ipv6", None)
@@ -350,6 +360,8 @@ class IicpNode:
             payload["transport_method"] = self._cfg.transport_method
         if self._cfg.nat_type:
             payload["nat_type"] = self._cfg.nat_type
+        if self._cfg.exposure_mode:
+            payload["exposure_mode"] = self._cfg.exposure_mode
         if self._cfg.transport_metadata:
             payload["transport_metadata"] = self._cfg.transport_metadata
 
