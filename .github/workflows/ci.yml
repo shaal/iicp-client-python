@@ -17,9 +17,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/ruff-action@v1
+      - uses: actions/setup-python@v5
         with:
-          args: "check src tests"
+          python-version: '3.11'
+      # Pin ruff so I001 import-sort behaviour matches what contributors run locally —
+      # astral-sh/ruff-action@v1 installs the latest ruff, which disagreed with the
+      # pinned dev version on __init__.py import ordering and kept this job red.
+      - name: Install ruff
+        run: pip install ruff==0.15.14
+      - name: Lint
+        run: ruff check src tests
 
   test:
     name: Tests (pytest)
