@@ -43,6 +43,10 @@ _HEADER_LEN = 12
 _HEADER_STRUCT = struct.Struct("!4sBBBBI")
 _PING_INTERVAL_S = 30.0
 _MAX_RECONNECT_DELAY_S = 60.0
+# #359 — explicit connect timeout so a TCP-reachable-but-not-accepting relay
+# (firewall RST after delay, port scan) fails fast instead of blocking on the
+# OS default (~75s+). The run() loop catches the TimeoutError and reconnects.
+_CONNECT_TIMEOUT_S = 10.0
 
 # Frame type constants (mirrors MsgType in iicp_tcp.py)
 _MT_INIT = 0x01
@@ -161,7 +165,10 @@ class RelayWorkerClient:
             delay = min(delay * 2, _MAX_RECONNECT_DELAY_S)
 
     async def _session(self) -> None:
-        reader, writer = await asyncio.open_connection(self._relay_host, self._relay_port)
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(self._relay_host, self._relay_port),
+            timeout=_CONNECT_TIMEOUT_S,
+        )
         logger.debug(
             "Relay worker %s: connected to %s:%d",
             self._worker_id, self._relay_host, self._relay_port,
