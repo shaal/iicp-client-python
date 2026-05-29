@@ -95,7 +95,7 @@ class ServiceQualification:
 
 # ── Core mapping (NatProfile → ServiceQualification) ─────────────────────────
 
-def qualify_service(profile: "NatProfile") -> ServiceQualification:
+def qualify_service(profile: NatProfile) -> ServiceQualification:
     """Map a NatProfile to an ADR-043 ServiceQualification.
 
     Derives the 8-category ``exposure_mode`` from tier/transport_method/detection_log
@@ -125,9 +125,9 @@ def qualify_service(profile: "NatProfile") -> ServiceQualification:
 
     # Populate IPv6 sub-object
     if profile.ipv6:
-        ipv6_q.routable = bool(profile.ipv6.routable_address)
-        ipv6_q.pinhole_ok = getattr(profile.ipv6, "pinhole_ok", False)
-        ipv6_q.address = profile.ipv6.routable_address
+        ipv6_q.routable = bool(profile.ipv6.global_v6_available)
+        ipv6_q.pinhole_ok = profile.ipv6.pinhole_active
+        ipv6_q.address = profile.ipv6.addresses[0] if profile.ipv6.addresses else None
 
     exposure_mode = _derive_exposure_mode(profile, ipv4_q, ipv6_q)
     recommendation = _build_recommendation(exposure_mode, profile)
@@ -142,7 +142,7 @@ def qualify_service(profile: "NatProfile") -> ServiceQualification:
 
 
 def _derive_exposure_mode(
-    profile: "NatProfile",
+    profile: NatProfile,
     ipv4_q: Ipv4Qualification,
     ipv6_q: Ipv6Qualification,
 ) -> str:
@@ -172,7 +172,7 @@ def _derive_exposure_mode(
     return "outbound_only"
 
 
-def _build_recommendation(mode: str, profile: "NatProfile") -> str:
+def _build_recommendation(mode: str, profile: NatProfile) -> str:
     messages = {
         "ipv4_public_direct": "Direct IPv4 connection available. No additional setup needed.",
         "dual_stack_available": "Dual-stack (IPv4 + IPv6) available. Consumers can reach you on either path.",
