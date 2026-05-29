@@ -239,6 +239,16 @@ async def _serve(args: argparse.Namespace) -> int:
         if not args.external_ip_probe_url and saved.external_ip_probe_url:
             args.external_ip_probe_url = saved.external_ip_probe_url
 
+    # Onboarding: if no --model given, auto-select the first model the backend advertises
+    # so a bare `iicp-node serve` just works (parity with Rust/TS).
+    if not args.model and args.backend_url:
+        _models = _ollama_models(args.backend_url)
+        if _models:
+            args.model = _models[0]
+            sys.stderr.write(
+                f"no --model given — auto-selected '{args.model}' from {args.backend_url}\n"
+            )
+
     if not args.backend_url or not args.model:
         sys.stderr.write(
             "ERROR: --model is required (--backend-url defaults to http://localhost:11434). "
