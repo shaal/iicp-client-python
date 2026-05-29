@@ -99,9 +99,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     serve.add_argument(
         "--backend-url",
-        default=_env("IICP_BACKEND_URL"),
+        # Onboarding: default to Ollama's well-known local port so only --model is required.
+        default=_env("IICP_BACKEND_URL") or "http://localhost:11434",
         help="OpenAI-compatible backend URL (Ollama / vLLM / LM Studio). "
-        "env: IICP_BACKEND_URL",
+        "env: IICP_BACKEND_URL (default http://localhost:11434)",
     )
     serve.add_argument(
         "--backend-type",
@@ -240,9 +241,8 @@ async def _serve(args: argparse.Namespace) -> int:
 
     if not args.backend_url or not args.model:
         sys.stderr.write(
-            "ERROR: --backend-url and --model are required "
-            "(or set IICP_BACKEND_URL and IICP_BACKEND_MODEL, "
-            "or load via `--node <name>` after `iicp-node init`).\n"
+            "ERROR: --model is required (--backend-url defaults to http://localhost:11434). "
+            "Set IICP_BACKEND_MODEL, or load via `--node <name>` after `iicp-node init`.\n"
         )
         return 2
 
