@@ -29,16 +29,16 @@ from iicp_client.nat_detection import (
     detect_nat,
     renew_ipv6_pinhole,
 )
+from iicp_client.node import IicpNode, NodeConfig
+from iicp_client.otel_tracer import task_execute_span, task_validate_span
+from iicp_client.peer_manager import PeerManager
+from iicp_client.pricing import PricingConfig, build_pricing_block, sign_body, verify_signature
 from iicp_client.qualify import (
     EXPOSURE_MODES,
     ServiceQualification,
     qualify_service,
     qualify_service_async,
 )
-from iicp_client.node import IicpNode, NodeConfig
-from iicp_client.otel_tracer import task_execute_span, task_validate_span
-from iicp_client.peer_manager import PeerManager
-from iicp_client.pricing import PricingConfig, build_pricing_block, sign_body, verify_signature
 from iicp_client.scheduler import is_queue_eligible, qos_priority
 from iicp_client.token_validator import TokenValidator
 from iicp_client.trust_auditor import AuditReport, models_diverge, run_audit_pass
