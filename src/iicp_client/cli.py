@@ -47,6 +47,8 @@ from iicp_client.identity import (
     save_node,
     save_operator,
 )
+from iicp_client.node_log import setup_node_log
+from iicp_client.node_log import write_event as _log_event
 
 logger = logging.getLogger("iicp-node")
 
@@ -168,8 +170,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--skip-registration",
         action="store_true",
         default=(_env("IICP_SKIP_REGISTRATION", "false") or "false").lower() == "true",
-        help="Skip directory registration (development / offline mode). "
-        "env: IICP_SKIP_REGISTRATION",
+        help="Skip directory registration (development / offline mode). env: IICP_SKIP_REGISTRATION",
     )
     serve.add_argument(
         "--auto-detect-nat",
@@ -198,6 +199,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "outbound to (e.g. relay.example.com:9485). When set, this node acts "
         "as a relay-worker — inbound tasks are forwarded through the relay for "
         "operators behind CGNAT. env: IICP_RELAY_WORKER_ENDPOINT",
+    )
+    serve.add_argument(
+        "--log-dir",
+        default=_env("IICP_LOG_DIR"),
+        help="Directory for persistent log files (<node_id>.log + events.jsonl). "
+        "Default: ~/.iicp/logs/. env: IICP_LOG_DIR",
     )
 
     query = sub.add_parser(
@@ -278,6 +285,7 @@ async def _serve(args: argparse.Namespace) -> int:
     # default; operator opts in by exporting IICP_CIP_ALLOW_WORKER=true.
     if (os.environ.get("IICP_CIP_ALLOW_WORKER", "") or "").lower() in ("1", "true", "yes"):
         from iicp_client.cip_policy import configure_policy
+
         configure_policy(enabled=True, allow_worker=True, allow_coordinator=True)
 
     # If --node <name> points at a saved config, fill any unset CLI flags
@@ -287,10 +295,7 @@ async def _serve(args: argparse.Namespace) -> int:
     if getattr(args, "node", None):
         saved = load_node(args.node)
         if saved is None:
-            sys.stderr.write(
-                f"ERROR: no saved config at ~/.iicp/nodes/{args.node}.json. "
-                "Run `iicp-node init` first.\n"
-            )
+            sys.stderr.write(f"ERROR: no saved config at ~/.iicp/nodes/{args.node}.json. Run `iicp-node init` first.\n")
             return 2
         args.backend_url = args.backend_url or saved.backend_url
         args.model = args.model or saved.model
@@ -316,9 +321,7 @@ async def _serve(args: argparse.Namespace) -> int:
         _models = _ollama_models(args.backend_url)
         if _models:
             args.model = _models[0]
-            sys.stderr.write(
-                f"no --model given — auto-selected '{args.model}' from {args.backend_url}\n"
-            )
+            sys.stderr.write(f"no --model given — auto-selected '{args.model}' from {args.backend_url}\n")
 
     if not args.backend_url or not args.model:
         sys.stderr.write(
@@ -338,12 +341,15 @@ async def _serve(args: argparse.Namespace) -> int:
         if resolved_port != args.port:
             logger.info(
                 "Port %d in use — auto-incremented to first free port %d.",
-                args.port, resolved_port,
+                args.port,
+                resolved_port,
             )
         args.port = resolved_port
 
     node_id = (args.node_id or str(uuid.uuid4()))[:36]
     public_endpoint = args.public_endpoint or f"http://localhost:{args.port}"
+    _log_dir_override: str | None = getattr(args, "log_dir", None)
+    setup_node_log(node_id, _log_dir_override)
 
     relay_worker_ep: str | None = getattr(args, "relay_worker_endpoint", None)
     cfg = NodeConfig(
@@ -365,6 +371,7 @@ async def _serve(args: argparse.Namespace) -> int:
     # registration without manual port-forwarding.
     if args.auto_detect_nat:
         from iicp_client.nat_detection import detect_nat
+
         try:
             profile = await detect_nat(
                 args.host,
@@ -384,21 +391,18 @@ async def _serve(args: argparse.Namespace) -> int:
             # This is the fully automatic relay-as-last-resort path.
             if getattr(profile, "tier", 0) >= 3 and not relay_worker_ep:
                 logger.info(
-                    "NAT tier=%d: no direct or IPv6 endpoint available — "
-                    "querying directory for relay-capable peers.",
+                    "NAT tier=%d: no direct or IPv6 endpoint available — querying directory for relay-capable peers.",
                     profile.tier,
                 )
-                elected_relay = await _auto_elect_relay(
-                    args.directory_url, cfg.intent, node_id
-                )
+                elected_relay = await _auto_elect_relay(args.directory_url, cfg.intent, node_id)
                 if elected_relay:
                     relay_host, relay_port = elected_relay
                     relay_worker_ep = f"{relay_host}:{relay_port}"
                     cfg.relay_worker_endpoint = relay_worker_ep
                     logger.info(
-                        "NAT: auto-elected relay %s:%d — node will register "
-                        "via relay when connection is established.",
-                        relay_host, relay_port,
+                        "NAT: auto-elected relay %s:%d — node will register via relay when connection is established.",
+                        relay_host,
+                        relay_port,
                     )
                 else:
                     logger.warning(
@@ -424,6 +428,7 @@ async def _serve(args: argparse.Namespace) -> int:
                     NatProfile,
                     _maybe_open_v6_pinhole_for_endpoint,
                 )
+
                 synth = NatProfile(
                     tier=0,
                     transport_method="direct",
@@ -481,8 +486,10 @@ async def _serve(args: argparse.Namespace) -> int:
         try:
             token = await node.register()
             logger.info("Registered as %s (token=%s…)", node_id, (token or "")[:8])
+            _log_event(node_id, "register_ok", f"endpoint={public_endpoint}", _log_dir_override)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Registration failed: %s — continuing without heartbeat", exc)
+            _log_event(node_id, "register_fail", f"error={exc}", _log_dir_override)
 
     logger.info(
         "Serving %s on %s:%d — backend %s (model=%s, max_concurrent=%d)",
@@ -493,19 +500,24 @@ async def _serve(args: argparse.Namespace) -> int:
         args.model,
         args.max_concurrent,
     )
+    _log_event(
+        node_id,
+        "serve_start",
+        f"port={args.port} model={args.model} intent={args.intent}",
+        _log_dir_override,
+    )
     await node.serve(handler, host=args.host, port=args.port, node_token=token)
     return 0
 
 
-async def _auto_elect_relay(
-    directory_url: str, intent: str, node_id: str
-) -> tuple[str, int] | None:
+async def _auto_elect_relay(directory_url: str, intent: str, node_id: str) -> tuple[str, int] | None:
     """Query the directory for relay-capable nodes and elect one deterministically.
 
     Used when NAT detection returns tier≥3 (CGNAT with no usable IPv6 path).
     Returns (relay_host, relay_port) or None if no relay-capable peer is found.
     """
     import hashlib
+
     try:
         url = f"{directory_url.rstrip('/')}/v1/discover"
         with urllib.request.urlopen(  # noqa: S310
@@ -517,10 +529,7 @@ async def _auto_elect_relay(
         logger.debug("relay discovery failed: %s", exc)
         return None
 
-    candidates = [
-        n for n in data.get("nodes", [])
-        if n.get("relay_capable") and n.get("endpoint")
-    ]
+    candidates = [n for n in data.get("nodes", []) if n.get("relay_capable") and n.get("endpoint")]
     if not candidates:
         return None
 
@@ -555,9 +564,7 @@ def _prompt(question: str, default: str = "") -> str:
 def _ollama_models(backend_url: str) -> list[str]:
     """Best-effort: list models from a local Ollama. Empty list on any error."""
     try:
-        with urllib.request.urlopen(
-            backend_url.rstrip("/") + "/api/tags", timeout=2
-        ) as resp:
+        with urllib.request.urlopen(backend_url.rstrip("/") + "/api/tags", timeout=2) as resp:
             data = json.loads(resp.read().decode())
             return sorted({m["name"] for m in data.get("models", [])})
     except Exception:  # noqa: BLE001
@@ -583,9 +590,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
         print(f"Existing operator: {op.operator_id} ({op.display_name})\n")
 
     # 2) Backend (Ollama / vLLM / LM Studio) ───────────────────────────────
-    backend_url = _prompt(
-        "Backend URL (OpenAI-compatible)", "http://localhost:11434"
-    )
+    backend_url = _prompt("Backend URL (OpenAI-compatible)", "http://localhost:11434")
     models = _ollama_models(backend_url)
     if models:
         print(f"  Detected models at {backend_url}: {', '.join(models[:6])}")
@@ -675,9 +680,7 @@ def _check_dependencies(backend_url: str) -> list[_DepIssue]:
 
     # 1) Backend reachability
     try:
-        with urllib.request.urlopen(
-            backend_url.rstrip("/") + "/api/tags", timeout=2
-        ) as resp:
+        with urllib.request.urlopen(backend_url.rstrip("/") + "/api/tags", timeout=2) as resp:
             ok = resp.status == 200
         if ok:
             out.append(_DepIssue("backend", "ok", f"reachable at {backend_url}"))
@@ -698,21 +701,27 @@ def _check_dependencies(backend_url: str) -> list[_DepIssue]:
             __import__(mod)
             out.append(_DepIssue(mod, "ok", purpose))
         except ImportError:
-            out.append(_DepIssue(
-                mod,
-                "missing",
-                f"{purpose} (not installed)",
-                installable=True,
-                pip_extra=extra,
-            ))
+            out.append(
+                _DepIssue(
+                    mod,
+                    "missing",
+                    f"{purpose} (not installed)",
+                    installable=True,
+                    pip_extra=extra,
+                )
+            )
 
     # 3) IPv6 routing surface (advisory — doesn't gate anything)
     try:
         import asyncio
 
         from iicp_client.nat_detection import detect_ipv6
-        v6 = asyncio.get_event_loop().run_until_complete(detect_ipv6(0, timeout_s=1.5)) \
-            if not asyncio.get_event_loop().is_running() else None
+
+        v6 = (
+            asyncio.get_event_loop().run_until_complete(detect_ipv6(0, timeout_s=1.5))
+            if not asyncio.get_event_loop().is_running()
+            else None
+        )
     except Exception:  # noqa: BLE001
         v6 = None
     if v6 and v6.global_v6_available:
@@ -721,11 +730,13 @@ def _check_dependencies(backend_url: str) -> list[_DepIssue]:
             msg += "; outbound v6 reachable"
         out.append(_DepIssue("ipv6", "ok", msg))
     elif v6:
-        out.append(_DepIssue(
-            "ipv6",
-            "warn",
-            "no global IPv6 — direct hosting will require IPv4 + tunnel",
-        ))
+        out.append(
+            _DepIssue(
+                "ipv6",
+                "warn",
+                "no global IPv6 — direct hosting will require IPv4 + tunnel",
+            )
+        )
 
     return out
 
@@ -738,11 +749,7 @@ def _print_dep_status(issues: list[_DepIssue]) -> None:
 
 def _install_missing(issues: list[_DepIssue]) -> None:
     """Run `pip install iicp-client[<extras>]` for the missing-optional set."""
-    extras = sorted({
-        i.pip_extra
-        for i in issues
-        if i.severity == "missing" and i.installable and i.pip_extra
-    })
+    extras = sorted({i.pip_extra for i in issues if i.severity == "missing" and i.installable and i.pip_extra})
     if not extras:
         return
     spec = f"iicp-client[{','.join(extras)}]"
@@ -769,9 +776,7 @@ def _cmd_list(_args: argparse.Namespace) -> int:
     print(f"{'NAME'.ljust(width)}  MODEL                BACKEND")
     print(f"{'-' * width}  -------------------- --------------------------------")
     for n in nodes:
-        print(
-            f"{n.name.ljust(width)}  {n.model[:20].ljust(20)} {n.backend_url[:48]}"
-        )
+        print(f"{n.name.ljust(width)}  {n.model[:20].ljust(20)} {n.backend_url[:48]}")
     return 0
 
 

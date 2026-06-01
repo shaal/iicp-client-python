@@ -230,6 +230,10 @@ class IicpNode:
         self._nonces: dict[str, float] = {}
         self._nonces_lock = threading.Lock()
         self._metrics = _get_metrics()
+        # Incremental task counters drained on each heartbeat for directory reporting.
+        self._tasks_success = 0
+        self._tasks_failed = 0
+        self._task_counters_lock = threading.Lock()
         # R1 relay-as-last-resort (#341): session registry populated when
         # RelayAcceptServer is started by serve(). HTTP /v1/relay checks here
         # first before falling back to HTTP peer forwarding.
@@ -433,19 +437,26 @@ class IicpNode:
         The token also stays in the JSON body for back-compat with
         older directory builds that read it from the payload.
         """
+        # Drain incremental task counters for directory reputation reporting.
+        with self._task_counters_lock:
+            ok = self._tasks_success
+            fail = self._tasks_failed
+            self._tasks_success = 0
+            self._tasks_failed = 0
+        payload: dict = {
+            "node_id": self._cfg.node_id,
+            "node_token": node_token,
+            "status": "available",
+            "max_concurrent": self._availability.effective_max_concurrent(
+                self._cfg.max_concurrent
+            ),
+        }
+        if ok > 0 or fail > 0:
+            payload["metrics"] = {"tasks_success": ok, "tasks_failed": fail}
         resp = await self._http.post(
             f"{self._cfg.directory_url.rstrip('/')}{_HEARTBEAT_PATH}",
             headers={"Authorization": f"Bearer {node_token}"},
-            json={
-                "node_id": self._cfg.node_id,
-                "node_token": node_token,
-                "status": "available",
-                # Live capacity after availability shaping (ADR-006) so the
-                # directory's NodeScorer sees the operator's current window.
-                "max_concurrent": self._availability.effective_max_concurrent(
-                    self._cfg.max_concurrent
-                ),
-            },
+            json=payload,
         )
         resp.raise_for_status()
 
@@ -771,6 +782,8 @@ class IicpNode:
                         usage = result.get("usage") or {}
                         tokens = usage.get("total_tokens", 0) if isinstance(usage, dict) else 0
                         node._metrics.observe("completed", intent, qos, latency_ms, tokens)
+                        with node._task_counters_lock:
+                            node._tasks_success += 1
                         resp_body = json.dumps(
                             {
                                 "task_id": task_id,
@@ -788,6 +801,8 @@ class IicpNode:
                     except Exception as exc:
                         latency_ms = (time.monotonic() - t0) * 1000
                         node._metrics.observe("error", intent, qos, latency_ms)
+                        with node._task_counters_lock:
+                            node._tasks_failed += 1
                         logger.error("Handler error: %s", exc)
                         self.send_error(500, str(exc))
                 finally:
