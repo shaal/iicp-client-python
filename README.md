@@ -23,6 +23,21 @@ Requires **Python ≥ 3.11** and [`httpx`](https://www.python-httpx.org/).
 
 ---
 
+## Architecture — consumer or provider?
+
+This SDK covers **both** sides of the IICP protocol:
+
+| Role | What you do | Class |
+|------|-------------|-------|
+| **Consumer** | Send AI tasks to the mesh; discover and submit | `IicpClient` |
+| **Provider** | Run a node, register with the directory, serve tasks | `IicpNode` |
+
+Consumer and provider can run in the same process. A node that serves requests can also route tasks it can't handle to other mesh nodes (`IicpClient` inside the task handler).
+
+For production provider nodes backed by Ollama/vLLM, the `iicp-node` binary (Rust) and the Python adapter (`pip install iicp-adapter`) provide additional resilience and monitoring. See [iicp.network/docs/node-setup](https://iicp.network/docs/node-setup).
+
+---
+
 ## Quickstart
 
 ```python
