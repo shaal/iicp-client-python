@@ -145,7 +145,9 @@ class IicpClient:
             request.intent,
             DiscoverOptions(
                 region=request.constraints.region or self._cfg.region,
-                qos=request.constraints.qos,
+                # Do not filter by qos — qos is a task execution hint, not a
+                # node capability filter. Most nodes don't declare qos support
+                # in registration, so filtering by qos=interactive returns 0.
             ),
             traceparent=tp,
         )
@@ -157,52 +159,67 @@ class IicpClient:
                 retryable=True,
             )
 
-        node = node_list.nodes[0]  # highest score first (directory sorts by score)
         task_id = str(uuid.uuid4())
-        body: dict[str, Any] = {
-            "task_id": task_id,
-            "intent": request.intent,
-            "constraints": {
-                "timeout_ms": request.constraints.timeout_ms,
-                "qos": request.constraints.qos,
-            },
-        }
-        if request.auth.node_token:
-            body["auth"] = {"node_token": request.auth.node_token}
-
-        # IICP-CX S.16 §5: encrypt payload when use_confidentiality=True and node advertises a key
-        if self._cfg.use_confidentiality and node.cx_public_key:
-            from iicp_client._confidentiality import encrypt_payload
-            body["iicp_conf"] = encrypt_payload(request.payload, node.cx_public_key, task_id, request.intent)
-        else:
-            body["payload"] = request.payload
-
+        # Try up to max_retries nodes total (fallback on connection/network errors).
+        # For server-side 5xx on the same node, retry that node before falling through.
+        candidates = node_list.nodes[:max(1, self._cfg.max_retries)]
         last_exc: IicpError | None = None
-        for attempt in range(self._cfg.max_retries):
-            try:
-                raw, elapsed = await post_json(
-                    f"{node.endpoint}/v1/task",
-                    body,
-                    timeout_ms=request.constraints.timeout_ms,
-                    component="adapter",
-                    tls_verify=self._cfg.tls_verify,
-                    traceparent=tp,
-                )
-                return TaskResponse(
-                    task_id=raw.get("task_id", task_id),
-                    status=raw.get("status", "success"),
-                    result=raw.get("result"),
-                    metrics=TaskMetrics(
-                        latency_ms=elapsed,
-                        tokens_used=raw.get("usage", {}).get("total_tokens"),
-                        node_id=node.node_id,
-                    ),
-                )
-            except IicpError as exc:
-                last_exc = exc
-                if not exc.retryable or attempt == self._cfg.max_retries - 1:
-                    raise
-                await asyncio.sleep(0.5 * (attempt + 1))
+
+        for node in candidates:
+            body: dict[str, Any] = {
+                "task_id": task_id,
+                "intent": request.intent,
+                "constraints": {
+                    "timeout_ms": request.constraints.timeout_ms,
+                    "qos": request.constraints.qos,
+                },
+            }
+            if request.auth.node_token:
+                body["auth"] = {"node_token": request.auth.node_token}
+
+            # IICP-CX S.16 §5: encrypt payload when use_confidentiality=True and node advertises a key
+            if self._cfg.use_confidentiality and node.cx_public_key:
+                from iicp_client._confidentiality import encrypt_payload
+                body["iicp_conf"] = encrypt_payload(request.payload, node.cx_public_key, task_id, request.intent)
+            else:
+                body["payload"] = request.payload
+
+            node_connected = True
+            for attempt in range(self._cfg.max_retries):
+                try:
+                    raw, elapsed = await post_json(
+                        f"{node.endpoint}/v1/task",
+                        body,
+                        timeout_ms=request.constraints.timeout_ms,
+                        component="adapter",
+                        tls_verify=self._cfg.tls_verify,
+                        traceparent=tp,
+                    )
+                    return TaskResponse(
+                        task_id=raw.get("task_id", task_id),
+                        status=raw.get("status", "success"),
+                        result=raw.get("result"),
+                        metrics=TaskMetrics(
+                            latency_ms=elapsed,
+                            tokens_used=raw.get("usage", {}).get("total_tokens"),
+                            node_id=node.node_id,
+                        ),
+                    )
+                except IicpError as exc:
+                    last_exc = exc
+                    if not exc.retryable:
+                        raise  # hard auth/validation failure — don't retry or fallback
+                    # Network/connection error → skip to next node immediately
+                    if exc.code in ("IICP-E003", "IICP-E004"):
+                        node_connected = False
+                        break
+                    # Server-side 5xx — retry same node with backoff
+                    if attempt < self._cfg.max_retries - 1:
+                        await asyncio.sleep(0.5 * (attempt + 1))
+                    else:
+                        break  # exhausted retries on this node → try next
+            if not node_connected:
+                continue  # this node was unreachable, try next
 
         raise last_exc  # type: ignore[misc]
 
