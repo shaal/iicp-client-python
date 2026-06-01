@@ -157,8 +157,8 @@ def _derive_exposure_mode(
     if profile.tier == 4 or profile.public_endpoint is None:
         return "ipv4_cgnat_blocked" if ipv4_q.cgnat else "outbound_only"
 
-    # tier 0 or 1 — some form of direct/mapped reachability
-    ipv4_reachable = profile.public_endpoint is not None
+    # tier 0 or 1 — IPv6 GUA endpoints contain '['; must not be mistaken for IPv4.
+    ipv4_reachable = bool(profile.public_endpoint) and "[" not in profile.public_endpoint
 
     if ipv4_reachable and ipv6_available and ipv6_q.pinhole_ok:
         return "dual_stack_available"
