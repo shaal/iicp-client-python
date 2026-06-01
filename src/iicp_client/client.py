@@ -43,14 +43,17 @@ def _is_ssrf_safe(url: str) -> bool:
         return False
     if any(host.endswith(s) for s in (".local", ".internal", ".lan", ".test", ".invalid", ".localhost")):
         return False
-    if "." not in host:
-        return False
     try:
         addr = ipaddress.ip_address(host)
+        # IP address (IPv4 or IPv6): safe unless private/loopback/link-local/reserved
         if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved:
             return False
+        return True  # global unicast IPv4/IPv6 — safe
     except ValueError:
         pass
+    # Hostname: require at least one dot to block bare Docker service names
+    if "." not in host:
+        return False
     return True
 
 
