@@ -200,7 +200,72 @@ def _build_parser() -> argparse.ArgumentParser:
         "operators behind CGNAT. env: IICP_RELAY_WORKER_ENDPOINT",
     )
 
+    query = sub.add_parser(
+        "query",
+        help="Discover mesh nodes and submit a chat task.",
+    )
+    query.add_argument("prompt", nargs="+", help="Prompt text to send.")
+    query.add_argument(
+        "--directory-url",
+        default=_env("IICP_DIRECTORY_URL", "https://iicp.network/api"),
+        help="IICP directory base URL. env: IICP_DIRECTORY_URL",
+    )
+    query.add_argument(
+        "--intent",
+        default=_env("IICP_INTENT", "urn:iicp:intent:llm:chat:v1"),
+        help="Intent URN to query. env: IICP_INTENT",
+    )
+    query.add_argument("--model", default=None, help="Pin to a specific model on the remote node.")
+    query.add_argument("--max-tokens", type=int, default=None, help="Limit response length.")
+    query.add_argument(
+        "--timeout-ms",
+        type=int,
+        default=60_000,
+        help="Request timeout in milliseconds.",
+    )
+
     return p
+
+
+async def _cmd_query_async(args: argparse.Namespace) -> int:
+    from iicp_client.client import IicpClient
+    from iicp_client.types import ClientConfig, TaskConstraints, TaskRequest
+
+    prompt_text = " ".join(args.prompt)
+    payload: dict = {"messages": [{"role": "user", "content": prompt_text}]}
+    if args.model:
+        payload["model"] = args.model
+    if args.max_tokens:
+        payload["max_tokens"] = args.max_tokens
+
+    cfg = ClientConfig(
+        directory_url=args.directory_url,
+        timeout_ms=args.timeout_ms,
+    )
+    client = IicpClient(cfg)
+    req = TaskRequest(
+        intent=args.intent,
+        payload=payload,
+        constraints=TaskConstraints(timeout_ms=args.timeout_ms),
+    )
+    print(f"[iicp-node] Discovering nodes for {args.intent}...", file=sys.stderr)
+    try:
+        resp = await client.submit_async(req)
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    if resp.status == "completed" and resp.result:
+        content = resp.result.get("content") or json.dumps(resp.result, indent=2)
+        print(content)
+        if resp.metrics and resp.metrics.node_id:
+            print(f"[iicp-node] routed to node {resp.metrics.node_id[:8]}", file=sys.stderr)
+            if resp.metrics.latency_ms is not None:
+                print(f"[iicp-node] latency {resp.metrics.latency_ms:.0f}ms", file=sys.stderr)
+        return 0
+
+    print(f"[iicp-node] task status: {resp.status}", file=sys.stderr)
+    return 1
 
 
 async def _serve(args: argparse.Namespace) -> int:
@@ -719,6 +784,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_init(args)
     if args.cmd == "list":
         return _cmd_list(args)
+    if args.cmd == "query":
+        return asyncio.run(_cmd_query_async(args))
     parser.error(f"unknown command: {args.cmd}")
     return 2
 
