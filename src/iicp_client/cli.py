@@ -33,6 +33,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass as _dc
+from importlib.metadata import version as _pkg_version
 
 from iicp_client import IicpNode, NodeConfig
 from iicp_client.backends import BACKEND_TYPES, get_backend_handler
@@ -79,6 +80,11 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="iicp-node",
         description="Run an IICP provider node backed by an OpenAI-compatible server.",
     )
+    try:
+        _ver = _pkg_version("iicp-client")
+    except Exception:
+        _ver = "unknown"
+    p.add_argument("--version", "-V", action="version", version=f"iicp-node {_ver}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser(
