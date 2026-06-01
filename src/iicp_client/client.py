@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
+import logging
 import re
 import uuid
 from typing import Any
+from urllib.parse import urlparse
 
 from iicp_client._http import _traceparent, get_json, post_json
 from iicp_client.errors import IicpError
@@ -28,6 +31,27 @@ from iicp_client.types import (
 
 _INTENT_RE = re.compile(r"^urn:iicp:intent:[a-z0-9_:/-]+$")
 _MAX_TIMEOUT_MS = 120_000
+
+
+def _is_ssrf_safe(url: str) -> bool:
+    """Return True if url is safe to connect to as a node endpoint (SSRF guard, #388)."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return False
+    host = (parsed.hostname or "").lower()
+    if not host or host in {"localhost", "0.0.0.0", "::1", "::"}:
+        return False
+    if any(host.endswith(s) for s in (".local", ".internal", ".lan", ".test", ".invalid", ".localhost")):
+        return False
+    if "." not in host:
+        return False
+    try:
+        addr = ipaddress.ip_address(host)
+        if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved:
+            return False
+    except ValueError:
+        pass
+    return True
 
 
 class IicpClient:
@@ -80,10 +104,19 @@ class IicpClient:
         elapsed = int((time.monotonic() - t0) * 1000)
 
         raw_nodes = data.get("nodes", [])
-        nodes = [
-            Node(
+        nodes = []
+        for n in raw_nodes:
+            endpoint = n["endpoint"]
+            if not _is_ssrf_safe(endpoint):
+                logging.getLogger(__name__).warning(
+                    "SDK: skipping node %s — endpoint %s is not publicly routable (SSRF guard)",
+                    n.get("node_id", "?")[:8],
+                    endpoint,
+                )
+                continue
+            nodes.append(Node(
                 node_id=n["node_id"],
-                endpoint=n["endpoint"],
+                endpoint=endpoint,
                 score=float(n.get("score", 0.0)),
                 available=bool(n.get("available", True)),
                 region=n.get("region", ""),
@@ -91,9 +124,7 @@ class IicpClient:
                 reputation_score=n.get("reputation_score"),
                 health_label=n.get("health_label"),
                 exposure_mode=n.get("exposure_mode"),
-            )
-            for n in raw_nodes
-        ]
+            ))
         return NodeList(nodes=nodes, query_ms=elapsed)
 
     async def submit_async(self, request: TaskRequest) -> TaskResponse:

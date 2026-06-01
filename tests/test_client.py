@@ -22,7 +22,7 @@ from iicp_client import (
 from iicp_client.node import IicpNode, NodeConfig
 
 DIRECTORY = "https://iicp.test"
-NODE = "https://node.iicp.test"
+NODE = "https://1.2.3.4:9484"
 DISCOVER_URL = f"{DIRECTORY}/v1/discover"
 TASK_URL = f"{NODE}/v1/task"
 
