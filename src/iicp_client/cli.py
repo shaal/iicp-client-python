@@ -161,7 +161,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     serve.add_argument(
         "--host",
-        default=_env("IICP_HOST", "0.0.0.0"),
+        default=_env("IICP_HOST", "::"),
         help="HTTP bind host. env: IICP_HOST",
     )
     serve.add_argument(
