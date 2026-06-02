@@ -129,6 +129,7 @@ class IicpClient:
                 health_label=n.get("health_label"),
                 exposure_mode=n.get("exposure_mode"),
                 cx_public_key=cx_key if isinstance(cx_key, dict) else None,
+                transport=n.get("transport") if isinstance(n.get("transport"), list) else None,
             ))
         return NodeList(nodes=nodes, query_ms=elapsed)
 

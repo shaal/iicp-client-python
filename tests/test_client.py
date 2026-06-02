@@ -37,6 +37,7 @@ GOOD_NODES = {
             # ADR-044 / ADR-043 fields (directory v1.10.0+)
             "health_label": "healthy",
             "exposure_mode": "ipv4_public_direct",
+            "transport": ["https", "iicp-native"],
         }
     ]
 }
@@ -84,6 +85,8 @@ def test_discover_returns_node_list():
     # ADR-044 — health_label + exposure_mode parsed from discover
     assert result.nodes[0].health_label == "healthy"
     assert result.nodes[0].exposure_mode == "ipv4_public_direct"
+    # #397 — transport parsed from discover
+    assert result.nodes[0].transport == ["https", "iicp-native"]
 
 
 @respx.mock
