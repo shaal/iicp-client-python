@@ -173,6 +173,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Skip directory registration (development / offline mode). env: IICP_SKIP_REGISTRATION",
     )
     serve.add_argument(
+        "--force",
+        action="store_true",
+        default=(_env("IICP_FORCE", "false") or "false").lower() == "true",
+        help="Take over the single-instance lock if another process serves this node_id. env: IICP_FORCE",
+    )
+    serve.add_argument(
         "--auto-detect-nat",
         action="store_true",
         # Default ON: auto-detection runs unless operator explicitly sets
@@ -481,6 +487,16 @@ async def _serve(args: argparse.Namespace) -> int:
         )
         args.skip_registration = True
 
+    # #405 — single-instance lock: refuse a second LIVE process for this node_id
+    # (the token-rotation war). Distinct node_ids are unaffected. Fails open.
+    from iicp_client.instance_lock import InstanceLock, NodeAlreadyServingError
+
+    try:
+        _instance_lock = InstanceLock.acquire(node_id, force=getattr(args, "force", False))
+    except NodeAlreadyServingError as exc:
+        logger.error(str(exc))
+        return 2
+
     # #404 — register with bounded backoff retry. On persistent failure, pass an
     # empty token (NOT None) so the heartbeat loop still starts and re-registers on
     # the first 401 (#399 path) once the directory is reachable — the self-healing
@@ -528,7 +544,10 @@ async def _serve(args: argparse.Namespace) -> int:
         f"port={args.port} model={args.model} intent={args.intent}",
         _log_dir_override,
     )
-    await node.serve(handler, host=args.host, port=args.port, node_token=token)
+    try:
+        await node.serve(handler, host=args.host, port=args.port, node_token=token)
+    finally:
+        _instance_lock.release()  # #405 — free the pidfile on shutdown
     return 0
 
 
