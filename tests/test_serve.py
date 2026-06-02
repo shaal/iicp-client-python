@@ -431,3 +431,56 @@ class TestTraceparent:
     def test_no_traceparent_no_trace_field(self, srv: _ServerHandle):
         status, body, _ = srv.post("/v1/task", {"task_id": "t", "intent": "x", "payload": {}})
         assert status == 200
+
+
+# ── #399 — heartbeat loop re-registers after the directory drops the node ──────
+
+
+def test_heartbeat_reregisters_on_404(monkeypatch):
+    """A 404/401/410 heartbeat (directory forgot the node) must trigger a
+    re-register, and the loop must resume with the fresh token — not heartbeat
+    into the void forever (#399)."""
+    import contextlib
+
+    import httpx
+
+    from iicp_client import node as node_mod
+
+    cfg = NodeConfig(
+        node_id="t",
+        endpoint="http://t.local",
+        intent="urn:iicp:intent:llm:chat:v1",
+        region="r",
+        model="m",
+        max_concurrent=1,
+    )
+    n = IicpNode(cfg)
+    monkeypatch.setattr(node_mod, "_HEARTBEAT_INTERVAL", 0.01)
+    calls = {"hb": 0, "reg": 0, "last_token": None}
+
+    async def fake_hb(tok):
+        calls["hb"] += 1
+        calls["last_token"] = tok
+        if calls["hb"] == 1:
+            req = httpx.Request("POST", "http://t.local/v1/heartbeat")
+            raise httpx.HTTPStatusError(
+                "node not found", request=req, response=httpx.Response(404, request=req)
+            )
+
+    async def fake_reg():
+        calls["reg"] += 1
+        return "fresh-token"
+
+    monkeypatch.setattr(n, "heartbeat", fake_hb)
+    monkeypatch.setattr(n, "register", fake_reg)
+
+    async def _run():
+        task = asyncio.create_task(n._heartbeat_loop("orig-token"))
+        await asyncio.sleep(0.06)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    asyncio.run(_run())
+    assert calls["reg"] >= 1, "should re-register after a 404 heartbeat"
+    assert calls["last_token"] == "fresh-token", "loop must resume with the fresh token"

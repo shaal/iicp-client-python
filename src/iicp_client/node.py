@@ -461,12 +461,32 @@ class IicpNode:
         resp.raise_for_status()
 
     async def _heartbeat_loop(self, node_token: str) -> None:
+        token = node_token
         while True:
             await asyncio.sleep(_HEARTBEAT_INTERVAL)
             try:
-                await self.heartbeat(node_token)
+                await self.heartbeat(token)
                 logger.debug("Heartbeat sent for %s", self._cfg.node_id)
-            except Exception as exc:
+            except httpx.HTTPStatusError as exc:
+                # #399 — the directory dropped the node (deregistered on a prior
+                # shutdown, TTL-expired after a heartbeat gap, or the directory
+                # restarted and forgot it). Re-register and resume with the fresh
+                # token instead of heartbeating into the void forever.
+                if exc.response.status_code in (401, 404, 410):
+                    logger.warning(
+                        "Heartbeat rejected (%s) — node unknown to directory; re-registering",
+                        exc.response.status_code,
+                    )
+                    try:
+                        token = await self.register()
+                        logger.info(
+                            "Re-registered %s after heartbeat rejection", self._cfg.node_id
+                        )
+                    except Exception as reg_exc:  # noqa: BLE001
+                        logger.warning("Re-registration failed: %s", reg_exc)
+                else:
+                    logger.warning("Heartbeat failed: %s", exc)
+            except Exception as exc:  # noqa: BLE001
                 logger.warning("Heartbeat failed: %s", exc)
 
     # ── Nonce replay protection ───────────────────────────────────────────

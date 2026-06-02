@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "iicp-client"
-version = "0.7.24"
+version = "0.7.25"
 description = "Official Python client SDK for the IICP protocol"
 readme = "README.md"
 license = {text = "Apache-2.0"}
