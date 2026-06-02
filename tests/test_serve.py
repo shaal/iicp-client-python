@@ -484,3 +484,53 @@ def test_heartbeat_reregisters_on_404(monkeypatch):
     asyncio.run(_run())
     assert calls["reg"] >= 1, "should re-register after a 404 heartbeat"
     assert calls["last_token"] == "fresh-token", "loop must resume with the fresh token"
+
+
+def test_heartbeat_self_heals_from_empty_initial_token(monkeypatch):
+    """#404 — when startup registration failed the heartbeat loop is started with
+    an empty token; its first heartbeat 401s and it must re-register and recover,
+    without a manual restart."""
+    import contextlib
+
+    import httpx
+
+    from iicp_client import node as node_mod
+
+    cfg = NodeConfig(
+        node_id="t",
+        endpoint="http://t.local",
+        intent="urn:iicp:intent:llm:chat:v1",
+        region="r",
+        model="m",
+        max_concurrent=1,
+    )
+    n = IicpNode(cfg)
+    monkeypatch.setattr(node_mod, "_HEARTBEAT_INTERVAL", 0.01)
+    calls = {"hb": 0, "reg": 0, "last_token": None}
+
+    async def fake_hb(tok):
+        calls["hb"] += 1
+        calls["last_token"] = tok
+        if tok == "":  # empty startup token → directory rejects with 401
+            req = httpx.Request("POST", "http://t.local/v1/heartbeat")
+            raise httpx.HTTPStatusError(
+                "unauthorized", request=req, response=httpx.Response(401, request=req)
+            )
+
+    async def fake_reg():
+        calls["reg"] += 1
+        return "recovered-token"
+
+    monkeypatch.setattr(n, "heartbeat", fake_hb)
+    monkeypatch.setattr(n, "register", fake_reg)
+
+    async def _run():
+        task = asyncio.create_task(n._heartbeat_loop(""))  # started with empty token
+        await asyncio.sleep(0.06)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    asyncio.run(_run())
+    assert calls["reg"] >= 1, "empty-token loop must re-register on the 401"
+    assert calls["last_token"] == "recovered-token", "loop must resume with the recovered token"

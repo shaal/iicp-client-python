@@ -1,8 +1,6 @@
 """Tests for iicp_client.node_log — persistent node log writer."""
 import json
 import logging
-import os
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -36,7 +34,7 @@ def test_write_event_multiple_appends(tmp_log_dir: Path) -> None:
     write_event("n1", "heartbeat_ok", "seq=2", str(tmp_log_dir))
     lines = (tmp_log_dir / "events.jsonl").read_text().strip().splitlines()
     assert len(lines) == 3
-    events = [json.loads(l)["event"] for l in lines]
+    events = [json.loads(ln)["event"] for ln in lines]
     assert events == ["register_ok", "heartbeat_ok", "heartbeat_ok"]
 
 
