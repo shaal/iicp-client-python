@@ -107,8 +107,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     serve.add_argument(
         "--backend-url",
-        # Onboarding: default to Ollama's well-known local port so only --model is required.
-        default=_env("IICP_BACKEND_URL") or "http://localhost:11434",
+        # #410 — default EMPTY so a saved-node config (--node) can supply backend_url.
+        # The localhost:11434 fallback is applied AFTER saved-config restore, giving
+        # the correct precedence: flag > env > saved-config > built-in default.
+        default=_env("IICP_BACKEND_URL") or "",
         help="OpenAI-compatible backend URL (Ollama / vLLM / LM Studio). "
         "env: IICP_BACKEND_URL (default http://localhost:11434)",
     )
@@ -328,6 +330,11 @@ async def _serve(args: argparse.Namespace) -> int:
             args.auto_detect_nat = True
         if not args.external_ip_probe_url and saved.external_ip_probe_url:
             args.external_ip_probe_url = saved.external_ip_probe_url
+
+    # #410 — built-in fallback applied LAST (after flag/env/saved-config), so the
+    # Ollama default never shadows a saved-node backend_url.
+    if not args.backend_url:
+        args.backend_url = "http://localhost:11434"
 
     # Onboarding: if no --model given, auto-select the first model the backend advertises
     # so a bare `iicp-node serve` just works (parity with Rust/TS).

@@ -44,6 +44,21 @@ async def test_chat_completion_happy_path():
     assert result["result"]["choices"][0]["message"]["content"] == "PONG"
 
 
+def test_cli_backend_url_default_is_empty_so_saved_config_applies(monkeypatch):
+    """#410 — the --backend-url flag must default to EMPTY (not the Ollama literal)
+    so a saved-node config can supply it via `args.backend_url or saved.backend_url`.
+    Regression: a non-empty default silently shadowed the saved backend_url."""
+    from iicp_client.cli import _build_parser
+
+    monkeypatch.delenv("IICP_BACKEND_URL", raising=False)
+    assert _build_parser().parse_args(["serve"]).backend_url == ""
+    # explicit flag still wins
+    assert _build_parser().parse_args(["serve", "--backend-url", "http://x:1/v1"]).backend_url == "http://x:1/v1"
+    # env still honoured
+    monkeypatch.setenv("IICP_BACKEND_URL", "http://env:2/v1")
+    assert _build_parser().parse_args(["serve"]).backend_url == "http://env:2/v1"
+
+
 def test_cli_backend_api_key_flag_and_env(monkeypatch):
     """#5 — the serve CLI exposes --backend-api-key, falling back to
     IICP_BACKEND_API_KEY, defaulting to empty (local Ollama needs no key)."""
