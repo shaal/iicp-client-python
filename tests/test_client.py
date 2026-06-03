@@ -314,6 +314,56 @@ def test_node_register_payload_spec_compliant():
 
 
 @respx.mock
+def test_node_register_attaches_operator_delegation_when_set():
+    """ADR-045 Phase A (#407) — when an operator delegation is configured, the
+    SDK attaches it to the register payload (the directory then verifies it)."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from iicp_client.delegation import issue_delegation, verify_delegation
+
+    op = Ed25519PrivateKey.generate()
+    delegation = issue_delegation(op, "n-1", ttl_seconds=3600)
+    assert verify_delegation(delegation, "n-1")  # well-formed for this node
+
+    route = respx.post("https://iicp.test/v1/register").mock(
+        return_value=httpx.Response(201, json={"node_token": "tok-1", "node_id": "n-1"})
+    )
+    node = IicpNode(
+        NodeConfig(
+            node_id="n-1",
+            endpoint="https://provider.example.com:8080",
+            intent="urn:iicp:intent:llm:chat:v1",
+            model="llama-3-8b",
+            directory_url="https://iicp.test",
+            operator_delegation=delegation,
+        )
+    )
+    asyncio.run(node.register())
+
+    payload = json.loads(route.calls[0].request.content)
+    assert payload["operator_delegation"] == delegation
+
+
+@respx.mock
+def test_node_register_omits_operator_delegation_when_absent():
+    route = respx.post("https://iicp.test/v1/register").mock(
+        return_value=httpx.Response(201, json={"node_token": "t", "node_id": "n-2"})
+    )
+    node = IicpNode(
+        NodeConfig(
+            node_id="n-2",
+            endpoint="https://p.example.com:8080",
+            intent="urn:iicp:intent:llm:chat:v1",
+            model="m",
+            directory_url="https://iicp.test",
+        )
+    )
+    asyncio.run(node.register())
+    payload = json.loads(route.calls[0].request.content)
+    assert "operator_delegation" not in payload  # back-compat: absent unless set
+
+
+@respx.mock
 def test_node_register_includes_transport_endpoint_when_set():
     """spec/iicp-dir.md v0.7.0: when transport_endpoint is configured, the SDK MUST
     advertise it so clients can prefer native IICP binary transport over HTTP."""

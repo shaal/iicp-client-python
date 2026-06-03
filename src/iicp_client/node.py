@@ -163,6 +163,12 @@ class NodeConfig:
     # falls back to the key the directory returned on register (populated
     # by register() into IicpNode._node_hmac_key for subsequent calls).
     node_hmac_key: str = ""
+    # ADR-045 Phase A (#407) — optional operator→node delegation token (built by
+    # the operator wallet via delegation.issue_delegation for this node_id). When
+    # set, register() attaches it; the directory verifies it offline and records
+    # the verified operator identity. Key lifecycle (gen/store/backup) is the
+    # wallet's concern (#307/ADR-030), kept out of the SDK transport layer.
+    operator_delegation: dict | None = None
     # Phase 3+ availability windows (ADR-006 / spec/iicp-dir.md §register
     # `availability`). Each entry: {"start": "HH:MM", "end": "HH:MM", "share": 0.0-1.0}
     # in local time. Shapes the effective capacity advertised to the directory and
@@ -411,6 +417,11 @@ class IicpNode:
             payload["exposure_mode"] = self._cfg.exposure_mode
         if self._cfg.transport_metadata:
             payload["transport_metadata"] = self._cfg.transport_metadata
+        # ADR-045 Phase A (#407) — attach the operator→node delegation when the
+        # operator/wallet has issued one (built via delegation.issue_delegation for
+        # this node_id). The directory verifies it offline and binds the operator.
+        if self._cfg.operator_delegation:
+            payload["operator_delegation"] = self._cfg.operator_delegation
 
         # SDK self-identification — directory surfaces these on /v1/discover
         # so dashboards can render a language badge. Free-form so future SDKs
