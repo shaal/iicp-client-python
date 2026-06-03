@@ -36,6 +36,42 @@ from iicp_client.scheduler import QUEUE_WAIT_S, is_queue_eligible
 
 logger = logging.getLogger(__name__)
 
+_EMBEDDING_INTENT = "urn:iicp:intent:llm:embedding:v1"
+
+
+def _intent_for_model(model: str, default_intent: str) -> str:
+    """#409 — classify a backend model to the IICP intent it serves.
+
+    Embedding models (name contains "embed") advertise the embedding intent;
+    every other model advertises the node's configured/default intent (chat).
+    Conservative: only embeddings are split out — the verified real case.
+    """
+    return _EMBEDDING_INTENT if "embed" in model.lower() else default_intent
+
+
+def _build_capabilities(models: list[str], default_intent: str, max_tokens: int) -> list[dict[str, Any]]:
+    """#409 — group detected backend models into one capability object per
+    intent so one node advertises every intent its backend can serve (chat +
+    embedding) instead of a single hardcoded intent. The directory accepts and
+    stores a multi-element capabilities array; serving works because the client
+    picks the per-intent model from discover. Back-compatible: a chat-only model
+    set yields the same single capability. First-seen intent leads (the
+    configured model — typically chat — comes first).
+    """
+    if not models:
+        return [{"intent": default_intent, "models": [], "max_tokens": max_tokens}]
+    order: list[str] = []
+    groups: dict[str, list[str]] = {}
+    for m in models:
+        intent = _intent_for_model(m, default_intent)
+        if intent not in groups:
+            groups[intent] = []
+            order.append(intent)
+        if m not in groups[intent]:
+            groups[intent].append(m)
+    return [{"intent": intent, "models": groups[intent], "max_tokens": max_tokens} for intent in order]
+
+
 _DEFAULT_TIMEOUT = 5.0
 _HEARTBEAT_INTERVAL = 30
 _NONCE_TTL = 300
@@ -221,9 +257,7 @@ class IicpNode:
         self._peer_manager = PeerManager(
             directory_url=config.directory_url,
             node_token=config.node_hmac_key,
-            persist_path=(
-                Path(config.peer_persist_path) if config.peer_persist_path else None
-            ),
+            persist_path=(Path(config.peer_persist_path) if config.peer_persist_path else None),
             relay_capable=config.relay_capable,
             relay_accept_port=config.relay_accept_port,
         )
@@ -238,6 +272,7 @@ class IicpNode:
         # RelayAcceptServer is started by serve(). HTTP /v1/relay checks here
         # first before falling back to HTTP peer forwarding.
         from iicp_client.relay_session import RelaySessionRegistry
+
         self._relay_sessions = RelaySessionRegistry()
         # ADR-019: HMAC key for signing pricing declarations. Initialized from
         # NodeConfig.node_hmac_key; overwritten from the directory's response
@@ -331,22 +366,18 @@ class IicpNode:
         # [config.model] when model is set, otherwise empty (directory will
         # reject; that's a configuration error the operator should fix).
         models = [self._cfg.model] if self._cfg.model else []
-        if self._cfg.capabilities:
-            # Legacy flat capabilities list — interpret each entry as an
-            # additional model name for the same intent. Keeps existing
-            # callers working without immediate API break.
-            models = list({*models, *self._cfg.capabilities})
+        for cap in self._cfg.capabilities:
+            # Legacy flat capabilities list — additional model names (GAP-6
+            # backend model probe). Preserve order (configured model leads).
+            if cap not in models:
+                models.append(cap)
 
         payload: dict[str, Any] = {
             "endpoint": self._cfg.endpoint,
             "region": self._cfg.region or "eu-central",
-            "capabilities": [
-                {
-                    "intent": self._cfg.intent,
-                    "models": models,
-                    "max_tokens": self._cfg.max_tokens,
-                }
-            ],
+            # #409 — one capability object per intent the backend can serve
+            # (e.g. chat + embedding), classified from the detected model set.
+            "capabilities": _build_capabilities(models, self._cfg.intent, self._cfg.max_tokens),
             "limits": {
                 "max_concurrent": self._cfg.max_concurrent,
                 "tokens_per_min": self._cfg.tokens_per_min,
@@ -373,6 +404,7 @@ class IicpNode:
         # so dashboards can render a language badge. Free-form so future SDKs
         # in other languages can self-tag without a directory change.
         from iicp_client import __version__ as _iicp_client_version
+
         payload["sdk_language"] = "python"
         payload["sdk_version"] = _iicp_client_version
 
@@ -394,9 +426,7 @@ class IicpNode:
         from iicp_client.pricing import PricingConfig, build_pricing_block
 
         if isinstance(self._cfg.pricing, PricingConfig):
-            payload["pricing"] = build_pricing_block(
-                self._cfg.pricing, hmac_key=self._node_hmac_key
-            )
+            payload["pricing"] = build_pricing_block(self._cfg.pricing, hmac_key=self._node_hmac_key)
         # When the operator pre-provisions a node_hmac_key, surface it so the
         # directory's RegisterController uses it instead of generating one.
         if self._cfg.node_hmac_key:
@@ -447,9 +477,7 @@ class IicpNode:
             "node_id": self._cfg.node_id,
             "node_token": node_token,
             "status": "available",
-            "max_concurrent": self._availability.effective_max_concurrent(
-                self._cfg.max_concurrent
-            ),
+            "max_concurrent": self._availability.effective_max_concurrent(self._cfg.max_concurrent),
         }
         if ok > 0 or fail > 0:
             payload["metrics"] = {"tasks_success": ok, "tasks_failed": fail}
@@ -479,9 +507,7 @@ class IicpNode:
                     )
                     try:
                         token = await self.register()
-                        logger.info(
-                            "Re-registered %s after heartbeat rejection", self._cfg.node_id
-                        )
+                        logger.info("Re-registered %s after heartbeat rejection", self._cfg.node_id)
                     except Exception as reg_exc:  # noqa: BLE001
                         logger.warning("Re-registration failed: %s", reg_exc)
                 else:
@@ -596,8 +622,7 @@ class IicpNode:
                         self._json_response(200, resp_body)
                     except Exception as exc:  # noqa: BLE001
                         err = json.dumps(
-                            {"error": {"code": "IICP-E031",
-                                       "message": f"relay session forward failed: {exc}"}}
+                            {"error": {"code": "IICP-E031", "message": f"relay session forward failed: {exc}"}}
                         ).encode()
                         self._json_response(502, err)
                     return
@@ -606,20 +631,14 @@ class IicpNode:
                 target = node._peer_manager.relay_target(target_id)
                 if target is None:
                     _msg = "target not in peer list and not a bound relay worker"
-                    err = json.dumps(
-                        {"error": {"code": "IICP-E030", "message": _msg}}
-                    ).encode()
+                    err = json.dumps({"error": {"code": "IICP-E030", "message": _msg}}).encode()
                     self._json_response(404, err)
                     return
                 try:
-                    resp = httpx.post(
-                        f"{target['endpoint'].rstrip('/')}/v1/task", json=task, timeout=120.0
-                    )
+                    resp = httpx.post(f"{target['endpoint'].rstrip('/')}/v1/task", json=task, timeout=120.0)
                     self._json_response(resp.status_code, resp.content)
                 except Exception as exc:  # noqa: BLE001
-                    err = json.dumps(
-                        {"error": {"code": "IICP-E031", "message": f"relay failed: {exc}"}}
-                    ).encode()
+                    err = json.dumps({"error": {"code": "IICP-E031", "message": f"relay failed: {exc}"}}).encode()
                     self._json_response(502, err)
 
             # ── GET /iicp/health ──────────────────────────────────────────
@@ -634,9 +653,7 @@ class IicpNode:
                     if uid is not None
                     else {"active": False}
                 )
-                eff_max = node._availability.effective_max_concurrent(
-                    node._cfg.max_concurrent
-                )
+                eff_max = node._availability.effective_max_concurrent(node._cfg.max_concurrent)
                 body = json.dumps(
                     {
                         "status": "ok",
@@ -686,11 +703,7 @@ class IicpNode:
                     return
 
                 constraints = body.get("constraints") or {}
-                qos = (
-                    constraints.get("qos_class", "best_effort")
-                    if isinstance(constraints, dict)
-                    else "best_effort"
-                )
+                qos = constraints.get("qos_class", "best_effort") if isinstance(constraints, dict) else "best_effort"
 
                 # #403 — CIP per-task admission gate (parity with the adapter
                 # cip_gate): reject tool-execution-domain intents unless the
@@ -775,9 +788,7 @@ class IicpNode:
                 try:
                     # Nonce replay — IICP-E011
                     if not node._check_nonce(body.get("nonce")):
-                        err = json.dumps(
-                            {"error": {"code": "IICP-E011", "message": "replay_detected"}}
-                        ).encode()
+                        err = json.dumps({"error": {"code": "IICP-E011", "message": "replay_detected"}}).encode()
                         self.send_response(409)
                         self.send_header("Content-Type", "application/json")
                         self.send_header("Content-Length", str(len(err)))
@@ -788,12 +799,8 @@ class IicpNode:
                     # Idempotency — duplicate task_id within the retry window (ADR-010).
                     # Distinct from nonce replay: dedups a retried CALL of the same task.
                     # Opt-in (NodeConfig.enable_idempotency) to preserve pre-0.6 behaviour.
-                    if node._cfg.enable_idempotency and not node._idempotency.check_and_register(
-                        body.get("task_id")
-                    ):
-                        err = json.dumps(
-                            {"error": {"code": "IICP-E010", "message": "duplicate_task"}}
-                        ).encode()
+                    if node._cfg.enable_idempotency and not node._idempotency.check_and_register(body.get("task_id")):
+                        err = json.dumps({"error": {"code": "IICP-E010", "message": "duplicate_task"}}).encode()
                         self.send_response(409)
                         self.send_header("Content-Type", "application/json")
                         self.send_header("Content-Length", str(len(err)))
@@ -810,6 +817,7 @@ class IicpNode:
                     intent = body.get("intent") or node._cfg.intent
 
                     from iicp_client.otel_tracer import task_execute_span, task_validate_span
+
                     with task_validate_span(task_id):
                         pass  # nonce check already completed above; span marks validation done
 
@@ -820,9 +828,7 @@ class IicpNode:
                             self.send_error(503, "node shutting down")
                             return
                         with task_execute_span(task_id, intent):
-                            result = asyncio.run_coroutine_threadsafe(handler(body), loop).result(
-                                timeout=60
-                            )
+                            result = asyncio.run_coroutine_threadsafe(handler(body), loop).result(timeout=60)
                         latency_ms = (time.monotonic() - t0) * 1000
                         usage = result.get("usage") or {}
                         tokens = usage.get("total_tokens", 0) if isinstance(usage, dict) else 0
@@ -883,20 +889,19 @@ class IicpNode:
         relay_accept_srv = None
         if self._cfg.relay_capable:
             from iicp_client.relay_session import RelayAcceptServer
+
             relay_port = getattr(self._cfg, "relay_accept_port", 9485)
-            relay_accept_srv = RelayAcceptServer(
-                self._relay_sessions, host=host, port=relay_port
-            )
+            relay_accept_srv = RelayAcceptServer(self._relay_sessions, host=host, port=relay_port)
             try:
                 await relay_accept_srv.start()
-                bg_tasks.append(asyncio.create_task(
-                    relay_accept_srv._server.serve_forever()  # type: ignore[union-attr]
-                ))
+                bg_tasks.append(
+                    asyncio.create_task(
+                        relay_accept_srv._server.serve_forever()  # type: ignore[union-attr]
+                    )
+                )
                 logger.info("Relay accept server started on %s:%d", host, relay_port)
             except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "Relay accept server failed to start: %s — relay sessions disabled", exc
-                )
+                logger.warning("Relay accept server failed to start: %s — relay sessions disabled", exc)
 
         # R2: if relay_worker_endpoint is configured, connect outbound to a relay.
         # This node acts as a relay worker — its tasks are routed through the relay
@@ -939,12 +944,14 @@ class IicpNode:
                     _current_token[0] = new_token
                     logger.info(
                         "Relay worker: re-registered with relay endpoint %s (token=%s…)",
-                        new_endpoint, (new_token or "")[:8],
+                        new_endpoint,
+                        (new_token or "")[:8],
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Relay worker: re-registration failed: %s", exc)
 
             from iicp_client.relay_worker_client import RelayWorkerClient
+
             relay_worker = RelayWorkerClient(
                 worker_id=self._cfg.node_id,
                 intent=self._cfg.intent,
@@ -995,9 +1002,7 @@ class IicpNode:
         """
         token = node_token or self._node_token
         if not token:
-            raise RuntimeError(
-                "deregister() requires a node_token (none stashed — call register() first)"
-            )
+            raise RuntimeError("deregister() requires a node_token (none stashed — call register() first)")
         url = self._cfg.directory_url.rstrip("/") + _REGISTER_PATH
         resp = await self._http.request(
             "DELETE",
@@ -1016,6 +1021,7 @@ class IicpNode:
         expire, but we keep trying so brief IGD hiccups don't kill the session.
         """
         from iicp_client.nat_detection import renew_ipv6_pinhole
+
         while True:
             delay = max(self._pinhole_lease_seconds // 2, 60)
             await asyncio.sleep(delay)
@@ -1050,13 +1056,13 @@ class IicpNode:
             return
         try:
             from iicp_client.nat_detection import delete_ipv6_pinhole
+
             ok = delete_ipv6_pinhole(uid)
             if ok:
                 logger.info("UPnP IPv6 pinhole uid=%s closed cleanly", uid)
             else:
                 logger.info(
-                    "UPnP IPv6 pinhole uid=%s revoke attempted but no IGD "
-                    "responded — router lease will auto-expire",
+                    "UPnP IPv6 pinhole uid=%s revoke attempted but no IGD responded — router lease will auto-expire",
                     uid,
                 )
         except Exception as exc:  # noqa: BLE001
