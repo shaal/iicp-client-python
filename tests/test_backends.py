@@ -311,13 +311,14 @@ async def test_vllm_error_message_uses_engine_label():
 
 
 class TestSelector:
-    def test_backend_types_lists_all_three(self):
-        assert set(BACKEND_TYPES) == {"openai_compat", "vllm", "llamacpp"}
+    def test_backend_types_lists_all_four(self):
+        assert set(BACKEND_TYPES) == {"openai_compat", "vllm", "llamacpp", "anthropic"}
 
     def test_get_backend_handler_returns_callable(self):
         assert callable(get_backend_handler("vllm", model="m"))
         assert callable(get_backend_handler("llamacpp", model="m"))
         assert callable(get_backend_handler("openai_compat", model="m"))
+        assert callable(get_backend_handler("anthropic", model="m"))
 
     def test_get_backend_handler_unknown_raises(self):
         try:
@@ -326,3 +327,133 @@ class TestSelector:
             assert "unknown backend_type" in str(exc)
         else:
             raise AssertionError("expected ValueError for unknown backend_type")
+
+
+# ── C1: native Anthropic Messages-API backend (#414) ───────────────────────
+
+
+from iicp_client.backends import anthropic_handler  # noqa: E402
+
+_ANTHROPIC_OK = {
+    "id": "msg_01abc",
+    "type": "message",
+    "role": "assistant",
+    "model": "claude-opus-4-8",
+    "content": [{"type": "text", "text": "PONG"}],
+    "stop_reason": "end_turn",
+    "usage": {"input_tokens": 11, "output_tokens": 2},
+}
+
+
+@respx.mock
+async def test_anthropic_chat_translates_request_and_response():
+    """Behavior test (fails without anthropic.py): an llm:chat task must POST to
+    /messages with x-api-key + anthropic-version + a defaulted max_tokens, hoist the
+    system message to the top-level `system` param, and the Anthropic response must
+    come back as the OpenAI chat-completion shape."""
+    route = respx.post("https://api.anthropic.com/v1/messages").mock(
+        return_value=httpx.Response(200, json=_ANTHROPIC_OK)
+    )
+    handler = anthropic_handler(model="claude-opus-4-8", api_key="sk-ant-test")
+    result = await handler(
+        {
+            "task_id": "t-ant",
+            "intent": "urn:iicp:intent:llm:chat:v1",
+            "payload": {
+                "messages": [
+                    {"role": "system", "content": "Be terse."},
+                    {"role": "user", "content": "ping"},
+                ]
+            },
+        }
+    )
+    assert route.called
+    req = route.calls.last.request
+    assert req.headers["x-api-key"] == "sk-ant-test"
+    assert req.headers["anthropic-version"] == "2023-06-01"
+    import json as _json
+
+    body = _json.loads(req.read())
+    assert body["system"] == "Be terse."  # system hoisted out of messages
+    assert body["messages"] == [{"role": "user", "content": "ping"}]
+    assert body["max_tokens"] == 4096  # defaulted (Anthropic requires it)
+    # response mapped to OpenAI chat shape
+    out = result["result"]
+    assert out["object"] == "chat.completion"
+    assert out["choices"][0]["message"]["content"] == "PONG"
+    assert out["choices"][0]["finish_reason"] == "stop"
+    assert out["usage"] == {"prompt_tokens": 11, "completion_tokens": 2, "total_tokens": 13}
+
+
+@respx.mock
+async def test_anthropic_maps_openai_image_block_to_anthropic_source():
+    """A vision chat (OpenAI image_url data-URL) must become an Anthropic base64
+    image block — first-class multimodal Claude, not the audio-stripping shim."""
+    route = respx.post("https://api.anthropic.com/v1/messages").mock(
+        return_value=httpx.Response(200, json=_ANTHROPIC_OK)
+    )
+    handler = anthropic_handler(model="claude-opus-4-8", api_key="k")
+    await handler(
+        {
+            "intent": "urn:iicp:intent:llm:chat:v1",
+            "payload": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "what is this?"},
+                            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+                        ],
+                    }
+                ]
+            },
+        }
+    )
+    import json as _json
+
+    blocks = _json.loads(route.calls.last.request.read())["messages"][0]["content"]
+    assert blocks[0] == {"type": "text", "text": "what is this?"}
+    assert blocks[1] == {
+        "type": "image",
+        "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"},
+    }
+
+
+@respx.mock
+async def test_anthropic_max_tokens_passthrough_when_set():
+    route = respx.post("https://api.anthropic.com/v1/messages").mock(
+        return_value=httpx.Response(200, json=_ANTHROPIC_OK)
+    )
+    handler = anthropic_handler(model="claude-opus-4-8", api_key="k")
+    await handler(
+        {
+            "intent": "urn:iicp:intent:llm:chat:v1",
+            "payload": {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 256, "stop": "END"},
+        }
+    )
+    import json as _json
+
+    body = _json.loads(route.calls.last.request.read())
+    assert body["max_tokens"] == 256
+    assert body["stop_sequences"] == ["END"]
+
+
+async def test_anthropic_rejects_non_chat_intent():
+    """Anthropic Messages serves only chat — embedding/completion must 400."""
+    handler = anthropic_handler(model="claude-opus-4-8", api_key="k")
+    result = await handler({"intent": "urn:iicp:intent:llm:embedding:v1", "payload": {"input": "x"}})
+    assert result["error_code"] == 400
+    assert "only" in result["error_message"]
+
+
+@respx.mock
+async def test_anthropic_upstream_error_surfaced():
+    respx.post("https://api.anthropic.com/v1/messages").mock(
+        return_value=httpx.Response(401, text='{"error":{"type":"authentication_error"}}')
+    )
+    handler = anthropic_handler(model="claude-opus-4-8", api_key="bad")
+    result = await handler(
+        {"intent": "urn:iicp:intent:llm:chat:v1", "payload": {"messages": [{"role": "user", "content": "hi"}]}}
+    )
+    assert result["error_code"] == 401
+    assert "authentication_error" in result["error_message"]

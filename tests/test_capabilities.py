@@ -48,3 +48,22 @@ def test_vision_model_advertises_image_modality_chat_capability():
     assert caps[1]["intent"] == CHAT
     assert caps[1]["input_modalities"] == ["text", "image"]
     assert caps[1]["models"] == ["qwen/qwen3-vl-8b"]
+
+
+def test_audio_model_advertises_audio_modality_chat_capability():
+    # B1/#414/ADR-046 — audio-in chat model → chat capability with audio input,
+    # distinct from text-only chat. Fails without audio detection in
+    # _modalities_for_model. Mirrors the vision modality (image-in).
+    caps = _build_capabilities(["qwen2.5:0.5b", "qwen2-audio-7b"], CHAT, 4096)
+    assert len(caps) == 2
+    assert caps[0]["input_modalities"] == ["text"]
+    assert caps[1]["intent"] == CHAT
+    assert caps[1]["input_modalities"] == ["text", "audio"]
+    assert caps[1]["models"] == ["qwen2-audio-7b"]
+
+
+def test_omni_model_advertises_image_and_audio_modalities():
+    # B1 — an "omni" model accepts both image and audio in chat.
+    caps = _build_capabilities(["qwen2.5-omni-7b"], CHAT, 4096)
+    assert len(caps) == 1
+    assert caps[0]["input_modalities"] == ["text", "image", "audio"]

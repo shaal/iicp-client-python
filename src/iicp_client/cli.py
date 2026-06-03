@@ -332,9 +332,14 @@ async def _serve(args: argparse.Namespace) -> int:
             args.external_ip_probe_url = saved.external_ip_probe_url
 
     # #410 — built-in fallback applied LAST (after flag/env/saved-config), so the
-    # Ollama default never shadows a saved-node backend_url.
+    # Ollama default never shadows a saved-node backend_url. #414/C1 — an `anthropic`
+    # backend defaults to the Anthropic API, not localhost Ollama.
     if not args.backend_url:
-        args.backend_url = "http://localhost:11434"
+        args.backend_url = (
+            "https://api.anthropic.com"
+            if getattr(args, "backend_type", "") == "anthropic"
+            else "http://localhost:11434"
+        )
 
     # Onboarding: if no --model given, auto-select the first model the backend advertises
     # so a bare `iicp-node serve` just works (parity with Rust/TS).

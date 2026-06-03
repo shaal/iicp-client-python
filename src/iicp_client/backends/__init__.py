@@ -17,6 +17,7 @@ then register it in `_FACTORIES` below.
 
 from __future__ import annotations
 
+from iicp_client.backends.anthropic import anthropic_handler
 from iicp_client.backends.base import TaskHandler
 from iicp_client.backends.llamacpp import llamacpp_handler
 from iicp_client.backends.openai_compat import openai_compat_handler
@@ -26,6 +27,7 @@ __all__ = [
     "openai_compat_handler",
     "vllm_handler",
     "llamacpp_handler",
+    "anthropic_handler",
     "get_backend_handler",
     "BACKEND_TYPES",
 ]
@@ -34,6 +36,7 @@ _FACTORIES = {
     "openai_compat": openai_compat_handler,
     "vllm": vllm_handler,
     "llamacpp": llamacpp_handler,
+    "anthropic": anthropic_handler,
 }
 
 BACKEND_TYPES = tuple(_FACTORIES.keys())

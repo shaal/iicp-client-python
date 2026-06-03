@@ -52,14 +52,22 @@ def _intent_for_model(model: str, default_intent: str) -> str:
 
 
 def _modalities_for_model(model: str) -> list[str]:
-    """#408 / ADR-046 — input modalities a model accepts. Vision-language models
-    (name contains vl/vision/llava) accept images; else text-only. Vision is a
-    modality of chat, not a separate intent.
+    """#408 / ADR-046 — input modalities a model accepts (B1: audio-in added).
+
+    Vision-language models (name contains vl/vision/llava) accept images; "omni"
+    models accept both image and audio; audio models (audio/voxtral/qwen*-audio)
+    accept audio; else text-only. Each is a modality of chat, not a separate intent.
+    The directory + spec accept text/image/audio/video in input_modalities (v0.10.0).
     """
     m = model.lower()
-    if "-vl-" in m or m.endswith("-vl") or "vision" in m or "llava" in m:
-        return ["text", "image"]
-    return ["text"]
+    has_image = "-vl-" in m or m.endswith("-vl") or "vision" in m or "llava" in m or "omni" in m
+    has_audio = "audio" in m or "voxtral" in m or "omni" in m
+    mods = ["text"]
+    if has_image:
+        mods.append("image")
+    if has_audio:
+        mods.append("audio")
+    return mods
 
 
 def _build_capabilities(models: list[str], default_intent: str, max_tokens: int) -> list[dict[str, Any]]:
