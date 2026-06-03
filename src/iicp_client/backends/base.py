@@ -28,6 +28,9 @@ TaskHandler = Callable[[dict[str, Any]], Coroutine[Any, Any, dict[str, Any]]]
 # #414 — speech-to-text. Multipart file upload, not a JSON body, so it takes a
 # distinct code path below.
 AUDIO_TRANSCRIBE_INTENT = "urn:iicp:intent:audio:transcribe:v1"
+# #414 — text-to-speech. JSON request but a *binary* audio response, so it also
+# takes a distinct path (the audio bytes are base64-encoded into the result).
+AUDIO_SPEECH_INTENT = "urn:iicp:intent:audio:speech:v1"
 
 # Maps IICP intent URN → OpenAI-compatible HTTP path.
 INTENT_TO_PATH: dict[str, str] = {
@@ -35,6 +38,7 @@ INTENT_TO_PATH: dict[str, str] = {
     "urn:iicp:intent:llm:completion:v1": "/completions",
     "urn:iicp:intent:llm:embedding:v1": "/embeddings",
     AUDIO_TRANSCRIBE_INTENT: "/audio/transcriptions",
+    AUDIO_SPEECH_INTENT: "/audio/speech",
 }
 
 
@@ -129,6 +133,50 @@ def build_openai_dialect_handler(
                 # response_format=text → plain body; normalise to {"text": ...}
                 data = {"text": r.text}
             return {"result": data}
+
+        # #414 — audio:speech (TTS): JSON request, but the response is binary audio.
+        # We base64-encode the bytes into the result so it rides the JSON task pipe.
+        if intent == AUDIO_SPEECH_INTENT:
+            text = payload.get("input")
+            if not isinstance(text, str) or not text:
+                return {
+                    "error_code": 400,
+                    "error_message": f"{engine}: audio:speech requires payload.input (text to synthesize)",
+                }
+            speech_body: dict[str, Any] = {"input": text}
+            req_model = payload.get("model") or model
+            if req_model:
+                speech_body["model"] = req_model
+            for opt in ("voice", "response_format", "speed"):
+                if payload.get(opt) is not None:
+                    speech_body[opt] = payload[opt]
+            # OpenAI-dialect servers require a voice; default for back-ends that need
+            # one (ignored by engines like espeak-ng).
+            speech_body.setdefault("voice", "alloy")
+            try:
+                async with httpx.AsyncClient(timeout=timeout_s, headers=headers) as client:
+                    r = await client.post(f"{base}{path}", json=speech_body)
+            except httpx.TimeoutException:
+                return {"error_code": 408, "error_message": f"{engine}: backend timed out"}
+            except httpx.HTTPError as exc:
+                return {
+                    "error_code": 502,
+                    "error_message": f"{engine}: HTTP transport error: {exc}",
+                }
+            if r.status_code >= 400:
+                return {
+                    "error_code": r.status_code,
+                    "error_message": f"{engine}: upstream {r.status_code}: {r.text[:512]}",
+                }
+            content_type = r.headers.get("content-type", "audio/mpeg")
+            return {
+                "result": {
+                    "audio": base64.b64encode(r.content).decode(),
+                    "content_type": content_type,
+                    "format": speech_body.get("response_format")
+                    or content_type.split("/")[-1],
+                }
+            }
 
         # Merge model: explicit task payload field wins; factory default fills in.
         body = dict(payload)

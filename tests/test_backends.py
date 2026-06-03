@@ -96,6 +96,45 @@ async def test_audio_transcribe_requires_audio_field():
     assert "audio" in result["error_message"]
 
 
+# ── #414 audio:speech (TTS) — JSON request, binary audio response ─────────────
+
+
+@respx.mock
+async def test_audio_speech_returns_base64_audio():
+    """audio:speech:v1 POSTs a JSON body and receives BINARY audio, which the
+    handler base64-encodes into result.audio. Verified end-to-end against an
+    espeak-ng OpenAI-compat shim (#414)."""
+    route = respx.post("http://localhost:11434/v1/audio/speech").mock(
+        return_value=httpx.Response(
+            200, content=b"RIFF....fake-wav-audio", headers={"content-type": "audio/wav"}
+        )
+    )
+    handler = openai_compat_handler(model="tts-1")
+    result = await handler(
+        {
+            "intent": "urn:iicp:intent:audio:speech:v1",
+            "payload": {"input": "hello world", "voice": "alloy"},
+        }
+    )
+    assert "error_code" not in result, result
+    assert base64.b64decode(result["result"]["audio"]) == b"RIFF....fake-wav-audio"
+    assert result["result"]["content_type"] == "audio/wav"
+    # JSON request body carried the text + model + voice
+    body = bytes(route.calls[0].request.content)
+    assert b"hello world" in body
+    assert b"tts-1" in body
+
+
+@respx.mock
+async def test_audio_speech_requires_input_field():
+    handler = openai_compat_handler(model="tts-1")
+    result = await handler(
+        {"intent": "urn:iicp:intent:audio:speech:v1", "payload": {}}
+    )
+    assert result["error_code"] == 400
+    assert "input" in result["error_message"]
+
+
 def test_cli_backend_url_default_is_empty_so_saved_config_applies(monkeypatch):
     """#410 — the --backend-url flag must default to EMPTY (not the Ollama literal)
     so a saved-node config can supply it via `args.backend_url or saved.backend_url`.
