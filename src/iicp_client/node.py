@@ -518,6 +518,12 @@ class IicpNode:
             "node_id": self._cfg.node_id,
             "node_token": node_token,
             "status": "available",
+            # Explicit availability boolean. The directory reads `available` (not the
+            # `status` string) when deciding discover eligibility; sending it lets the
+            # directory restore a node that briefly went dormant (host sleep) on the
+            # very next beat — robust even against directory builds older than v1.10.17
+            # whose heartbeat handler defaulted to the stored (possibly false) value.
+            "available": True,
             "max_concurrent": self._availability.effective_max_concurrent(self._cfg.max_concurrent),
         }
         if ok > 0 or fail > 0:

@@ -425,6 +425,30 @@ def test_heartbeat_answers_liveness_challenge():
 
 
 @respx.mock
+def test_heartbeat_payload_includes_available_true():
+    """The heartbeat body MUST carry an explicit `available: true` boolean (not only
+    the `status: "available"` string). The directory keys discover eligibility off the
+    `available` field; sending it lets a node that briefly went dormant be restored on
+    the next beat, robust even against directory builds older than v1.10.17."""
+    route = respx.post("https://iicp.test/v1/heartbeat").mock(
+        return_value=httpx.Response(200, json={"ok": True})
+    )
+    node = IicpNode(
+        NodeConfig(
+            node_id="n-1",
+            endpoint="https://p.example.com:8080",
+            intent="urn:iicp:intent:llm:chat:v1",
+            model="m",
+            directory_url="https://iicp.test",
+        )
+    )
+    asyncio.run(node.heartbeat("tok"))
+    payload = json.loads(route.calls[0].request.content)
+    assert payload["available"] is True
+    assert payload["status"] == "available"
+
+
+@respx.mock
 def test_node_register_includes_transport_endpoint_when_set():
     """spec/iicp-dir.md v0.7.0: when transport_endpoint is configured, the SDK MUST
     advertise it so clients can prefer native IICP binary transport over HTTP."""
