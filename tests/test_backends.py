@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import base64
+
 import httpx
 import respx
 
@@ -42,6 +44,56 @@ async def test_chat_completion_happy_path():
     assert "error_code" not in result
     assert result["result"]["id"] == "chatcmpl-test"
     assert result["result"]["choices"][0]["message"]["content"] == "PONG"
+
+
+# ── #414 audio:transcribe (STT) — multipart file upload ──────────────────────
+
+
+@respx.mock
+async def test_audio_transcribe_posts_multipart_and_returns_text():
+    """audio:transcribe:v1 decodes base64 audio and POSTs it as a multipart file
+    upload to /v1/audio/transcriptions (not a JSON body), returning the text.
+    Verified end-to-end against whisper.cpp's whisper-server (#414)."""
+    route = respx.post("http://localhost:11434/v1/audio/transcriptions").mock(
+        return_value=httpx.Response(200, json={"text": "hello world"})
+    )
+    handler = openai_compat_handler(model="whisper-1")
+    task = {
+        "task_id": "t-audio",
+        "intent": "urn:iicp:intent:audio:transcribe:v1",
+        "payload": {
+            "audio": base64.b64encode(b"RIFF....fake-wav-bytes").decode(),
+            "filename": "clip.wav",
+            "language": "en",
+        },
+    }
+    result = await handler(task)
+    assert "error_code" not in result, result
+    assert result["result"]["text"] == "hello world"
+    req = route.calls[0].request
+    assert req.headers["content-type"].startswith("multipart/form-data")
+    assert b"clip.wav" in req.content  # multipart file part present
+    assert b"whisper-1" in req.content  # model sent as a form field
+
+
+@respx.mock
+async def test_audio_transcribe_rejects_invalid_base64():
+    handler = openai_compat_handler(model="whisper-1")
+    result = await handler(
+        {"intent": "urn:iicp:intent:audio:transcribe:v1", "payload": {"audio": "!!not-base64!!"}}
+    )
+    assert result["error_code"] == 400
+    assert "base64" in result["error_message"]
+
+
+@respx.mock
+async def test_audio_transcribe_requires_audio_field():
+    handler = openai_compat_handler(model="whisper-1")
+    result = await handler(
+        {"intent": "urn:iicp:intent:audio:transcribe:v1", "payload": {}}
+    )
+    assert result["error_code"] == 400
+    assert "audio" in result["error_message"]
 
 
 def test_cli_backend_url_default_is_empty_so_saved_config_applies(monkeypatch):

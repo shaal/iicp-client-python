@@ -13,6 +13,8 @@ handler-factory style (tracker iicp.network#340; parity Block B).
 
 from __future__ import annotations
 
+import base64
+import binascii
 import logging
 from collections.abc import Callable, Coroutine
 from typing import Any
@@ -23,11 +25,16 @@ logger = logging.getLogger(__name__)
 
 TaskHandler = Callable[[dict[str, Any]], Coroutine[Any, Any, dict[str, Any]]]
 
+# #414 — speech-to-text. Multipart file upload, not a JSON body, so it takes a
+# distinct code path below.
+AUDIO_TRANSCRIBE_INTENT = "urn:iicp:intent:audio:transcribe:v1"
+
 # Maps IICP intent URN → OpenAI-compatible HTTP path.
 INTENT_TO_PATH: dict[str, str] = {
     "urn:iicp:intent:llm:chat:v1": "/chat/completions",
     "urn:iicp:intent:llm:completion:v1": "/completions",
     "urn:iicp:intent:llm:embedding:v1": "/embeddings",
+    AUDIO_TRANSCRIBE_INTENT: "/audio/transcriptions",
 }
 
 
@@ -67,6 +74,61 @@ def build_openai_dialect_handler(
                     f"supported: {sorted(INTENT_TO_PATH.keys())}"
                 ),
             }
+
+        # #414 — audio:transcribe is a multipart file upload (OpenAI
+        # /v1/audio/transcriptions). IICP tasks are JSON, so the audio rides as
+        # base64 in payload["audio"]; model is OPTIONAL (whisper.cpp ignores it,
+        # vLLM/OpenAI use it). Distinct from the JSON flow below.
+        if intent == AUDIO_TRANSCRIBE_INTENT:
+            audio_b64 = payload.get("audio") or payload.get("audio_b64")
+            if not isinstance(audio_b64, str) or not audio_b64:
+                return {
+                    "error_code": 400,
+                    "error_message": (
+                        f"{engine}: audio:transcribe requires payload.audio "
+                        "(base64-encoded audio bytes)"
+                    ),
+                }
+            try:
+                audio_bytes = base64.b64decode(audio_b64, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                return {
+                    "error_code": 400,
+                    "error_message": f"{engine}: payload.audio is not valid base64: {exc}",
+                }
+            filename = str(payload.get("filename") or "audio.wav")
+            form: dict[str, Any] = {"response_format": "json"}
+            req_model = payload.get("model") or model
+            if req_model:
+                form["model"] = req_model
+            for opt in ("language", "response_format", "prompt", "temperature"):
+                if payload.get(opt) is not None:
+                    form[opt] = payload[opt]
+            try:
+                async with httpx.AsyncClient(timeout=timeout_s, headers=headers) as client:
+                    r = await client.post(
+                        f"{base}{path}",
+                        files={"file": (filename, audio_bytes)},
+                        data=form,
+                    )
+            except httpx.TimeoutException:
+                return {"error_code": 408, "error_message": f"{engine}: backend timed out"}
+            except httpx.HTTPError as exc:
+                return {
+                    "error_code": 502,
+                    "error_message": f"{engine}: HTTP transport error: {exc}",
+                }
+            if r.status_code >= 400:
+                return {
+                    "error_code": r.status_code,
+                    "error_message": f"{engine}: upstream {r.status_code}: {r.text[:512]}",
+                }
+            try:
+                data = r.json()
+            except ValueError:
+                # response_format=text → plain body; normalise to {"text": ...}
+                data = {"text": r.text}
+            return {"result": data}
 
         # Merge model: explicit task payload field wins; factory default fills in.
         body = dict(payload)
