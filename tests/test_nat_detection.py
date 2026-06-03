@@ -12,6 +12,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 from iicp_client.nat_detection import (
+    Ipv6Profile,
     _detect_cgnat,
     _looks_routable,
     _probe_external_ip,
@@ -163,6 +164,47 @@ class TestDetectNatTier0:
         # Operator guidance should be present so the user knows what to do
         assert profile.operator_guidance is not None
 
+    async def test_ipv6_gua_auto_elected_as_tier_0(self):
+        """#416 — a dual-stack host with a global IPv6 GUA + working v6 listener
+        and NO public IPv4 must auto-elect http://[GUA]:port as a tier-0 direct
+        endpoint with zero manual IICP_PUBLIC_ENDPOINT. Parity with the Rust SDK;
+        fails before the IPv6 tier-0 election was added (fell through to tier-4)."""
+        gua = "2a0a:a543:df54:0:888:9777:7743:8ae"
+        v6 = Ipv6Profile(global_v6_available=True, stable_v6_available=True, addresses=[gua])
+        v6.listener_v6_ok = True
+
+        async def _fake_detect_ipv6(*_a, **_k):
+            return v6
+
+        with (
+            patch("iicp_client.nat_detection.detect_ipv6", _fake_detect_ipv6),
+            patch("iicp_client.nat_detection._detect_public_v4_on_interfaces", return_value=None),
+        ):
+            profile = await detect_nat("0.0.0.0", 9484)
+        assert profile.tier == 0
+        assert profile.transport_method == "direct"
+        assert profile.public_endpoint == f"http://[{gua}]:9484"
+        assert profile.is_reachable()
+
+    async def test_ipv6_election_prefers_stable_over_privacy(self):
+        """When both a rotating RFC 4941 privacy address and a stable EUI-64 GUA
+        are present, the stable one is advertised so the endpoint doesn't churn."""
+        privacy = "2a0a:a543:df54:0:1234:5678:9abc:def0"  # no ff:fe → privacy
+        stable = "2a0a:a543:df54:0:020c:29ff:fe33:4455"  # ff:fe → EUI-64 stable
+        v6 = Ipv6Profile(global_v6_available=True, stable_v6_available=True, addresses=[privacy, stable])
+        v6.listener_v6_ok = True
+
+        async def _fake_detect_ipv6(*_a, **_k):
+            return v6
+
+        with (
+            patch("iicp_client.nat_detection.detect_ipv6", _fake_detect_ipv6),
+            patch("iicp_client.nat_detection._detect_public_v4_on_interfaces", return_value=None),
+        ):
+            profile = await detect_nat("0.0.0.0", 9484)
+        assert profile.tier == 0
+        assert profile.public_endpoint == f"http://[{stable}]:9484"
+
 
 # ── detect_nat tier-1 (mocked UPnP) ─────────────────────────────────────────
 
@@ -182,7 +224,9 @@ class TestDetectNatTier1Mocked:
 
         with patch("iicp_client.nat_detection._try_upnp_mapping", fake_try):
             with patch("iicp_client.nat_detection._detect_cgnat", return_value=None):
-                profile = await detect_nat("0.0.0.0", 8080)
+                # detect_v6=False isolates the UPnP/v4 path — on a host with a real
+                # IPv6 GUA the #416 tier-0 v6 election would otherwise pre-empt UPnP.
+                profile = await detect_nat("0.0.0.0", 8080, detect_v6=False)
         assert profile.tier == 1
         assert profile.transport_method == "upnp_mapped"
         assert profile.public_endpoint == "http://8.8.8.5:8080"
@@ -203,7 +247,7 @@ class TestDetectNatTier1Mocked:
 
         with patch("iicp_client.nat_detection._try_upnp_mapping", fake_try):
             with patch("iicp_client.nat_detection._detect_cgnat", return_value=None):
-                profile = await detect_nat("0.0.0.0", 8080, transport_port=9484)
+                profile = await detect_nat("0.0.0.0", 8080, transport_port=9484, detect_v6=False)
         assert profile.public_endpoint == "http://8.8.8.5:8080"
         assert profile.transport_endpoint == "iicp://8.8.8.5:9484"
 
@@ -256,6 +300,7 @@ class TestDetectNatTier1Mocked:
                     "0.0.0.0",
                     8080,
                     external_ip_probe_url="https://api.ipify.test",
+                    detect_v6=False,
                 )
         assert profile.tier == 1
         assert profile.public_endpoint == "http://8.8.8.99:8080"
@@ -265,11 +310,18 @@ class TestDetectNatTier1Mocked:
 
 
 class TestIpv6Fallback:
-    """When the IPv4 path can't expose the node (CGNAT or UPnP failure) but the
-    host has a working IPv6 GUA + verified outbound v6 connectivity, detect_nat
-    advertises the v6 endpoint as tier-1 instead of returning tier-4."""
+    """#416 + ADR-047 supersede the pre-#416 design (v6 GUA = tier-1 fallback gated
+    on verified *outbound* v6). A host with a global IPv6 GUA + a working v6 listener
+    is now elected as a **tier-0 direct** endpoint — early, before UPnP, and without
+    requiring outbound reachability. Rationale: inbound reachability (what matters for
+    a serving node) can't be proven locally; the directory un-hide model tolerates a
+    node it can't dial-back-probe; clients fall back if a dial fails. This mirrors the
+    Rust SDK's tier-0 v6 election exactly (full-parity rule)."""
 
-    async def test_cgnat_v4_falls_back_to_v6(self):
+    async def test_cgnat_v4_gua_elected_tier_0_direct(self):
+        # CGNAT v4 (UPnP would map) but a working v6 GUA exists → the v6 GUA is
+        # elected tier-0 DIRECTLY, ahead of the v4 UPnP path (direct > mapped).
+        # Pre-#416 this returned tier-1 (v6 fallback after the v4 attempt).
         from iicp_client.nat_detection import Ipv6Profile
 
         fake_v4 = _UpnpResult(
@@ -300,15 +352,17 @@ class TestIpv6Fallback:
                 with patch("iicp_client.nat_detection.detect_ipv6", fake_v6):
                     profile = await detect_nat("0.0.0.0", 8080)
 
-        assert profile.tier == 1
+        assert profile.tier == 0
         assert profile.transport_method == "direct"
         assert profile.public_endpoint == "http://[2a0a:a543:df54::1]:8080"
         assert profile.ipv6 is not None
         assert profile.ipv6.global_v6_available
-        assert "IPv6 GUA" in (profile.operator_guidance or "")
 
-    async def test_v6_unreachable_keeps_tier_4(self):
-        """IPv6 GUA exists but outbound v6 fails → no fallback, stays tier-4."""
+    async def test_v6_gua_elected_tier_0_even_without_outbound(self):
+        """#416 parity: a bound GUA is elected tier-0 even when the outbound v6
+        probe fails — outbound is not a proxy for inbound serving reachability, and
+        the directory un-hide model tolerates a node it can't verify. (Pre-#416 this
+        stayed tier-4; the outbound gate is superseded.)"""
         from iicp_client.nat_detection import Ipv6Profile
 
         async def fake_v6(_port, *, timeout_s=3.0):
@@ -316,7 +370,7 @@ class TestIpv6Fallback:
                 global_v6_available=True,
                 addresses=["2a0a:a543:df54::1"],
                 listener_v6_ok=True,
-                external_v6_reachable=False,  # ← outbound v6 fails
+                external_v6_reachable=False,  # outbound v6 probe fails — no longer a gate
             )
 
         with patch(
@@ -325,8 +379,9 @@ class TestIpv6Fallback:
         ):
             with patch("iicp_client.nat_detection.detect_ipv6", fake_v6):
                 profile = await detect_nat("0.0.0.0", 8080)
-        assert profile.tier == 4
-        assert profile.transport_method == "unreachable"
+        assert profile.tier == 0
+        assert profile.transport_method == "direct"
+        assert profile.public_endpoint == "http://[2a0a:a543:df54::1]:8080"
 
     async def test_v6_detection_can_be_disabled(self):
         with patch(

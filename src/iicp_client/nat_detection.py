@@ -203,6 +203,35 @@ async def detect_nat(
         )
         return t0
 
+    # Tier 0 (IPv6, #416) — a stable global IPv6 GUA on a dual-stack host with a
+    # working v6 listener is directly reachable when the v6 firewall is open (the
+    # common residential dual-stack case). Auto-advertise it as a Direct endpoint so
+    # the operator needs no manual IICP_PUBLIC_ENDPOINT. Inbound firewall state cannot
+    # be proven locally; the directory's un-hide model (ADR-047) tolerates a node it
+    # cannot dial-back-probe, and clients fall back if a dial fails. Parity with the
+    # Rust SDK's tier-0 IPv6 election (#416).
+    v6 = profile.ipv6
+    if v6 is not None and v6.global_v6_available and v6.listener_v6_ok:
+        # Prefer a stable (RFC 7217 secured / EUI-64 / manual) GUA over a rotating
+        # RFC 4941 privacy address so the advertised endpoint doesn't churn.
+        gua = next((a for a in v6.addresses if not _is_privacy_v6(a)), None) or (
+            v6.addresses[0] if v6.addresses else None
+        )
+        if gua:
+            auto_url = f"http://[{gua}]:{bind_port}"
+            profile.detection_log.append(
+                f"tier-0: auto-detected stable global IPv6 GUA → {auto_url!r} "
+                "(direct IPv6; inbound depends on an open v6 firewall)"
+            )
+            return NatProfile(
+                tier=0,
+                transport_method="direct",
+                public_endpoint=auto_url,
+                internal_endpoint=profile.internal_endpoint,
+                detection_log=profile.detection_log,
+                ipv6=profile.ipv6,
+            )
+
     # Tier 1 — UPnP
     # Skip UPnP when running inside a Docker bridge-networked container:
     # the UPnP request reaches Docker's internal NAT, not the home router.
