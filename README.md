@@ -74,15 +74,15 @@ print(response.choices[0].message.content)
 from iicp_client import ClientConfig
 
 config = ClientConfig(
-    directory_url = "https://iicp.network",  # IICP directory
-    timeout_ms    = 30_000,                  # max 120 000 (SDK-04)
-    region        = "eu-central",            # prefer nodes in region
+    directory_url = "https://iicp.network/api",  # IICP directory
+    timeout_ms    = 30_000,                      # max 120 000 (SDK-04)
+    region        = "eu-central",                # prefer nodes in region
 )
 ```
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `directory_url` | `"https://iicp.network"` | IICP directory endpoint |
+| `directory_url` | `"https://iicp.network/api"` | IICP directory endpoint |
 | `timeout_ms` | `30000` | Request timeout — max 120 000 ms |
 | `region` | `None` | Preferred node region |
 | `max_retries` | `3` | Retry count for transient errors |
@@ -160,6 +160,67 @@ own port, hence its own NAT pinhole; multiple models served by one node share th
 single port. Auto-increment is skipped when you pass an explicit `--public-endpoint`
 (you own the port mapping in that case). `IicpNode.serve(port=…)` uses the port you
 give it as-is (no auto-increment at the library level).
+
+---
+
+## Backends
+
+A provider node forwards each task to an inference backend. The backend is selected
+with `--backend-type` (env `IICP_BACKEND_TYPE`, default `openai_compat`):
+
+| `--backend-type` | Engine | Default backend URL | API |
+|------------------|--------|---------------------|-----|
+| `openai_compat` | Ollama, LM Studio, any OpenAI-compatible server | `http://localhost:11434` | OpenAI `/v1/*` |
+| `vllm` | vLLM OpenAI server | `http://localhost:8000` | OpenAI `/v1/*` |
+| `llamacpp` | llama.cpp `llama-server` | `http://localhost:8080` | OpenAI `/v1/*` |
+| `anthropic` | Native Anthropic Messages API — first-class Claude | `https://api.anthropic.com` | Anthropic `/v1/messages` |
+
+The `anthropic` backend speaks the Anthropic Messages API directly (not the OpenAI-compat
+shim): it translates an IICP `llm:chat:v1` task into a Messages request and translates the
+response back to the OpenAI chat-completion shape, so a Claude-backed node looks identical
+to an Ollama/vLLM node to any IICP client. Run one with:
+
+```bash
+iicp-node serve \
+  --backend-type anthropic \
+  --backend-api-key "$ANTHROPIC_API_KEY" \
+  --model claude-opus-4-8
+```
+
+`--backend-type anthropic` defaults `--backend-url` to `https://api.anthropic.com`, so you
+only pass the key and the model. The key is sent as the `x-api-key` header; an
+`anthropic-version` header (`2023-06-01`) is added automatically. The Anthropic backend
+serves `urn:iicp:intent:llm:chat:v1` only (the Messages API has no completion/embedding
+endpoint).
+
+Common serve flags (all also read from env):
+
+| Flag | Env | Default | Purpose |
+|------|-----|---------|---------|
+| `--backend-type` | `IICP_BACKEND_TYPE` | `openai_compat` | Inference engine (table above) |
+| `--backend-url` | `IICP_BACKEND_URL` | `http://localhost:11434` | Backend base URL |
+| `--backend-api-key` | `IICP_BACKEND_API_KEY` | _(empty)_ | Bearer / `x-api-key` for an auth'd backend |
+| `--model` | `IICP_BACKEND_MODEL` | _(auto-detect)_ | Backend model id (e.g. `qwen2.5:0.5b`, `claude-opus-4-8`) |
+
+The SDK is configured entirely through CLI flags and environment variables — there is no
+config file.
+
+### Input modalities — text, image, audio
+
+A node advertises the input modalities each model accepts in its capabilities, so clients
+can discover a vision- or audio-capable node. The modality set is auto-detected from the
+model name:
+
+| Model name contains | Advertised `input_modalities` |
+|---------------------|-------------------------------|
+| `vl`, `vision`, `llava` | `text`, `image` |
+| `audio`, `voxtral` | `text`, `audio` |
+| `omni` | `text`, `image`, `audio` |
+| (anything else) | `text` |
+
+These are modalities of the `llm:chat:v1` intent, not separate intents. The directory
+supports a `?modality=image|audio` filter on discover so a client can find nodes that
+accept a given input type.
 
 ---
 
@@ -273,7 +334,7 @@ Conformance tier: `iicp:sdk:v1` (spec S.14) · [Request a badge](https://iicp.ne
 
 ```bash
 pip install -e ".[dev]"   # install with dev deps
-pytest tests/ -v          # run 213 unit tests
+pytest tests/ -v          # run 255 unit tests
 ruff check src tests       # lint
 ```
 

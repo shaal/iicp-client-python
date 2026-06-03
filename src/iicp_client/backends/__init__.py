@@ -8,6 +8,8 @@ Available backends:
                     Maps intent URN → /v1/{chat/completions,completions,embeddings}.
   - vllm          — vLLM OpenAI server (default port 8000).
   - llamacpp      — llama.cpp `llama-server` (default port 8080).
+  - anthropic     — native Anthropic Messages API (first-class Claude). Speaks
+                    POST /v1/messages directly; serves llm:chat:v1 only.
 
 Use `get_backend_handler(backend_type, ...)` to select one by name (e.g. from a CLI
 `--backend-type` flag). Adding a new backend: create a module here whose factory
