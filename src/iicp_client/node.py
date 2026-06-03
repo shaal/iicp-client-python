@@ -49,27 +49,39 @@ def _intent_for_model(model: str, default_intent: str) -> str:
     return _EMBEDDING_INTENT if "embed" in model.lower() else default_intent
 
 
+def _modalities_for_model(model: str) -> list[str]:
+    """#408 / ADR-046 — input modalities a model accepts. Vision-language models
+    (name contains vl/vision/llava) accept images; else text-only. Vision is a
+    modality of chat, not a separate intent.
+    """
+    m = model.lower()
+    if "-vl-" in m or m.endswith("-vl") or "vision" in m or "llava" in m:
+        return ["text", "image"]
+    return ["text"]
+
+
 def _build_capabilities(models: list[str], default_intent: str, max_tokens: int) -> list[dict[str, Any]]:
-    """#409 — group detected backend models into one capability object per
-    intent so one node advertises every intent its backend can serve (chat +
-    embedding) instead of a single hardcoded intent. The directory accepts and
-    stores a multi-element capabilities array; serving works because the client
-    picks the per-intent model from discover. Back-compatible: a chat-only model
-    set yields the same single capability. First-seen intent leads (the
-    configured model — typically chat — comes first).
+    """#409 + #408 — group detected backend models into one capability object per
+    (intent, input_modalities): advertise every intent the backend serves (chat +
+    embedding) AND distinguish text-only vs image-capable (vision) chat. The
+    directory accepts a multi-element capabilities array; clients pick the
+    per-(intent,modality) model from discover. Back-compatible: a single text chat
+    model yields the same single ["text"] capability. First-seen group leads.
     """
     if not models:
-        return [{"intent": default_intent, "models": [], "max_tokens": max_tokens}]
+        return [{"intent": default_intent, "models": [], "max_tokens": max_tokens, "input_modalities": ["text"]}]
     order: list[str] = []
-    groups: dict[str, list[str]] = {}
+    groups: dict[str, dict[str, Any]] = {}
     for m in models:
         intent = _intent_for_model(m, default_intent)
-        if intent not in groups:
-            groups[intent] = []
-            order.append(intent)
-        if m not in groups[intent]:
-            groups[intent].append(m)
-    return [{"intent": intent, "models": groups[intent], "max_tokens": max_tokens} for intent in order]
+        modalities = _modalities_for_model(m)
+        key = f"{intent}\0{','.join(modalities)}"
+        if key not in groups:
+            groups[key] = {"intent": intent, "models": [], "max_tokens": max_tokens, "input_modalities": modalities}
+            order.append(key)
+        if m not in groups[key]["models"]:
+            groups[key]["models"].append(m)
+    return [groups[key] for key in order]
 
 
 _DEFAULT_TIMEOUT = 5.0

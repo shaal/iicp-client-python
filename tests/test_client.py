@@ -166,9 +166,7 @@ async def test_submit_sdk01_retries_transient(monkeypatch):
 @respx.mock
 def test_submit_non_retryable_raises_immediately():
     respx.get(DISCOVER_URL).mock(return_value=httpx.Response(200, json=GOOD_NODES))
-    respx.post(TASK_URL).mock(
-        return_value=httpx.Response(401, json={"code": "IICP-E002", "message": "unauthorized"})
-    )
+    respx.post(TASK_URL).mock(return_value=httpx.Response(401, json={"code": "IICP-E002", "message": "unauthorized"}))
     client = IicpClient(ClientConfig(directory_url=DIRECTORY))
     with pytest.raises(IicpError) as exc_info:
         client.submit(TaskRequest(intent="urn:iicp:intent:llm:chat:v1", payload={}))
@@ -303,7 +301,13 @@ def test_node_register_payload_spec_compliant():
     assert payload["region"] == "eu-central"
     assert payload["limits"] == {"max_concurrent": 2, "tokens_per_min": 2000}
     assert payload["capabilities"] == [
-        {"intent": "urn:iicp:intent:llm:chat:v1", "models": ["llama-3-8b"], "max_tokens": 8192}
+        {
+            "intent": "urn:iicp:intent:llm:chat:v1",
+            "models": ["llama-3-8b"],
+            "max_tokens": 8192,
+            # #408/ADR-046 — capability now declares input modalities (text-only here).
+            "input_modalities": ["text"],
+        }
     ]
     assert "transport_endpoint" not in payload  # not set → not sent
     assert "intent" not in payload  # spec rejects flat intent at top level
@@ -422,9 +426,7 @@ def test_apply_nat_profile_populates_fields_from_nat_profile():
     assert payload["transport_method"] == "upnp_mapped"
     assert payload["nat_type"] == "unknown"  # set by helper when none provided
     assert payload["transport_metadata"]["tier"] == 1
-    assert payload["transport_metadata"]["detection_log_tail"] == [
-        "tier-1: UPnP mapped 8080 → http://203.0.113.5:8080"
-    ]
+    assert payload["transport_metadata"]["detection_log_tail"] == ["tier-1: UPnP mapped 8080 → http://203.0.113.5:8080"]
 
 
 @respx.mock
@@ -474,6 +476,4 @@ def test_sdk06_traceparent_shared_across_submit():
     disc_tp = disc_route.calls[0].request.headers.get("traceparent", "")
     task_tp = task_route.calls[0].request.headers.get("traceparent", "")
     # both must have the same trace-id (index 1)
-    assert disc_tp.split("-")[1] == task_tp.split("-")[1], (
-        f"trace-id mismatch: discover={disc_tp!r} task={task_tp!r}"
-    )
+    assert disc_tp.split("-")[1] == task_tp.split("-")[1], f"trace-id mismatch: discover={disc_tp!r} task={task_tp!r}"
