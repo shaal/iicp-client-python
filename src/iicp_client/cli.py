@@ -378,11 +378,16 @@ async def _serve(args: argparse.Namespace) -> int:
     setup_node_log(node_id, _log_dir_override)
 
     relay_worker_ep: str | None = getattr(args, "relay_worker_endpoint", None)
+    _backend_flavor = _detect_backend_flavor(
+        args.backend_url, getattr(args, "backend_api_key", "") or "", args.backend_type
+    )
+    sys.stderr.write(f"backend detected: {_backend_flavor}\n")
     cfg = NodeConfig(
         node_id=node_id,
         endpoint=public_endpoint,
         intent=args.intent,
         model=args.model,
+        backend=_backend_flavor,
         region=args.region,
         directory_url=args.directory_url,
         max_concurrent=args.max_concurrent,
@@ -618,6 +623,52 @@ def _prompt(question: str, default: str = "") -> str:
     sys.stdout.flush()
     line = sys.stdin.readline().strip()
     return line or default
+
+
+def _detect_backend_flavor(backend_url: str, api_key: str = "", backend_type: str = "openai_compat") -> str:
+    """Detect the backend server flavor for the `backend` node-detail field:
+    ollama / lmstudio / vllm / llamacpp / anthropic / custom. Mirrors
+    iicp-client-rust. For non-OpenAI dialects the configured backend_type is
+    authoritative; for openai_compat it fingerprints /v1/models response headers
+    — X-Powered-By:Express → lmstudio (LM Studio also serves Ollama-compatible
+    /api/version + /api/tags, so the Express header is the discriminator, not those
+    endpoints), uvicorn/vllm → vllm, llama → llamacpp, else probe /api/version →
+    ollama, else custom (generic OpenAI-compatible)."""
+    if backend_type in ("anthropic", "vllm", "llamacpp"):
+        return backend_type
+    base = backend_url.rstrip("/")
+    root = base[:-3] if base.endswith("/v1") else base
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+
+    def _ok(path: str):
+        try:
+            req = urllib.request.Request(f"{root}{path}", headers=headers)
+            return urllib.request.urlopen(req, timeout=2)
+        except Exception:  # noqa: BLE001
+            return None
+
+    resp = _ok("/v1/models")
+    if resp is not None:
+        with resp:
+            powered = (resp.headers.get("X-Powered-By") or "").lower()
+            server = (resp.headers.get("Server") or "").lower()
+        if "express" in powered:
+            return "lmstudio"
+        if "vllm" in server or "uvicorn" in server:
+            return "vllm"
+        if "llama.cpp" in server or "llama-server" in server:
+            return "llamacpp"
+        v = _ok("/api/version")
+        if v is not None:
+            v.close()
+            return "ollama"
+        return "custom"
+    # No /v1/models (older Ollama) — try the proprietary endpoint.
+    v = _ok("/api/version")
+    if v is not None:
+        v.close()
+        return "ollama"
+    return "custom"
 
 
 def _ollama_models(backend_url: str, api_key: str = "") -> list[str]:

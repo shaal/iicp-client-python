@@ -129,6 +129,9 @@ class NodeConfig:
     endpoint: str
     intent: str
     model: str | None = None
+    # Detected backend server flavor advertised at register (node-detail field):
+    # ollama / lmstudio / vllm / llamacpp / anthropic / custom.
+    backend: str | None = None
     region: str | None = None
     capabilities: list[str] = field(default_factory=list)
     directory_url: str = "https://iicp.network/api"
@@ -443,6 +446,8 @@ class IicpNode:
 
         payload["sdk_language"] = "python"
         payload["sdk_version"] = _iicp_client_version
+        if self._cfg.backend:
+            payload["backend"] = self._cfg.backend
 
         # S.12 §2.1 — CIP-D1 policy block. Use the per-config policy if set,
         # otherwise fall back to the module-level cip_policy.get_policy().

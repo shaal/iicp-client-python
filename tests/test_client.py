@@ -345,6 +345,36 @@ def test_node_register_attaches_operator_delegation_when_set():
 
 
 @respx.mock
+def test_node_register_includes_backend_when_set():
+    """#414 — the detected backend server flavor is advertised at register."""
+    route = respx.post("https://iicp.test/v1/register").mock(
+        return_value=httpx.Response(201, json={"node_token": "tok-1", "node_id": "n-b"})
+    )
+    node = IicpNode(
+        NodeConfig(
+            node_id="n-b",
+            endpoint="https://provider.example.com:8080",
+            intent="urn:iicp:intent:llm:chat:v1",
+            model="llama-3-8b",
+            backend="ollama",
+            directory_url="https://iicp.test",
+        )
+    )
+    asyncio.run(node.register())
+    payload = json.loads(route.calls[0].request.content)
+    assert payload["backend"] == "ollama"
+
+
+def test_detect_backend_flavor_backend_type_authoritative():
+    """#414 — non-OpenAI dialects classify by backend_type without probing."""
+    from iicp_client.cli import _detect_backend_flavor
+
+    assert _detect_backend_flavor("http://x", "", "anthropic") == "anthropic"
+    assert _detect_backend_flavor("http://x", "", "vllm") == "vllm"
+    assert _detect_backend_flavor("http://x", "", "llamacpp") == "llamacpp"
+
+
+@respx.mock
 def test_node_register_omits_operator_delegation_when_absent():
     route = respx.post("https://iicp.test/v1/register").mock(
         return_value=httpx.Response(201, json={"node_token": "t", "node_id": "n-2"})
