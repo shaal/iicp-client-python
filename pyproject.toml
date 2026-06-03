@@ -10,7 +10,7 @@ readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.11"
 authors = [
-    {name = "IICP Contributors", email = "claude@roblemumin.com"},
+    {name = "IICP Contributors"},
 ]
 keywords = ["iicp", "ai-agents", "protocol", "sdk", "llm"]
 classifiers = [
