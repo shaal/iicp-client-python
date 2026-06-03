@@ -995,7 +995,12 @@ async def detect_ipv6(
     (#326 / iter-1458) remains the source of truth for inbound reachability.
     """
     profile = Ipv6Profile()
-    profile.addresses = _list_global_ipv6_addresses()
+    # #416 — enumerate GUAs via the interface-aware candidate scan (ifconfig on macOS,
+    # ifaddr on Linux); fall back to the hostname-resolution scan only if that yields
+    # nothing. The hostname method (_list_global_ipv6_addresses) is broken on macOS —
+    # a Mac's hostname doesn't resolve to its GUA, so it falsely reported
+    # global_v6_available=False and the node refused to register despite working IPv6.
+    profile.addresses = _local_global_ipv6_candidates() or _list_global_ipv6_addresses()
     profile.global_v6_available = bool(profile.addresses)
     profile.stable_v6_available = any(
         not _is_privacy_v6(a) for a in profile.addresses

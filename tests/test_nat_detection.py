@@ -335,3 +335,18 @@ class TestIpv6Fallback:
         ):
             profile = await detect_nat("0.0.0.0", 8080, detect_v6=False)
         assert profile.ipv6 is None
+
+
+async def test_detect_ipv6_uses_interface_candidates_not_hostname():
+    """#416 — detect_ipv6 must enumerate GUAs via the interface-aware candidate
+    scan (ifconfig/ifaddr), NOT hostname resolution (which is empty on macOS where
+    the host's name doesn't resolve to its GUA). Regression: the node falsely
+    reported global_v6_available=False and refused to register over working IPv6."""
+    import iicp_client.nat_detection as nat
+
+    with patch.object(nat, "_local_global_ipv6_candidates", return_value=["2a0a:dead:beef::1"]):
+        # hostname method returns nothing (simulating the macOS bug) — must not matter
+        with patch.object(nat, "_list_global_ipv6_addresses", return_value=[]):
+            p = await nat.detect_ipv6(9484)
+    assert p.global_v6_available is True
+    assert "2a0a:dead:beef::1" in p.addresses
