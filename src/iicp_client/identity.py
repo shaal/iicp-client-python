@@ -21,6 +21,8 @@ can't read the node tokens or operator identity.
 """
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
 import re
@@ -64,23 +66,78 @@ class OperatorIdentity:
 
     Credits earned by any node this operator runs accumulate to this
     operator_id at the directory. Treat it as your IICP user account.
+
+    #464 — the identity is an ed25519 keypair: ``operator_id`` IS the base64
+    public key (the same value the directory verifies + stores as
+    ``operator_pubkey`` via the ADR-045 delegation), so the operator_id is
+    cryptographically verifiable rather than a random UUID. ``operator_secret``
+    is the base64 32-byte private key — LOCAL ONLY (0600 file), never sent to
+    the directory; password-at-rest encryption is #460. ``operator_integrity_hash``
+    binds the immutable fields so the directory can pin-on-first-use + detect
+    tampering (the directory's own clock, not ``created_at``, is authoritative
+    for founder ordinals). ``display_name`` is the public, mutable handle;
+    ``contact`` is private.
     """
     operator_id: str
     created_at: str
     display_name: str = ""
     contact: str = ""
+    # #464 — base64 ed25519 private key (32-byte seed). Local-only secret.
+    operator_secret: str = ""
+    # #464/#460 — SHA256(operator_id ':' created_at), pinned by the directory on first use.
+    operator_integrity_hash: str = ""
 
     @classmethod
     def generate(cls, *, display_name: str = "", contact: str = "") -> OperatorIdentity:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+        sk = Ed25519PrivateKey.generate()
+        operator_id = base64.b64encode(sk.public_key().public_bytes_raw()).decode()
+        operator_secret = base64.b64encode(sk.private_bytes_raw()).decode()
+        created_at = _now_iso()
         return cls(
-            operator_id=f"op-{uuid.uuid4()}",
-            created_at=_now_iso(),
+            operator_id=operator_id,
+            created_at=created_at,
             display_name=display_name,
             contact=contact,
+            operator_secret=operator_secret,
+            operator_integrity_hash=cls.compute_integrity_hash(operator_id, created_at),
         )
 
+    @staticmethod
+    def compute_integrity_hash(operator_id: str, created_at: str) -> str:
+        return hashlib.sha256(f"{operator_id}:{created_at}".encode()).hexdigest()
+
+    def signing_key(self):
+        """Return the ed25519 private key for signing delegations / mutations.
+        Raises if this is a legacy (keyless ``op-<uuid>``) identity — regenerate."""
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+        if not self.operator_secret:
+            raise ValueError(
+                "legacy operator identity has no key (operator_id is a UUID, not a public key) — "
+                "regenerate with `iicp-node operator init` (#464)"
+            )
+        return Ed25519PrivateKey.from_private_bytes(base64.b64decode(self.operator_secret))
+
+    def is_key_backed(self) -> bool:
+        """True when operator_id is a real ed25519 pubkey (not a legacy op-<uuid>)."""
+        return bool(self.operator_secret) and not self.operator_id.startswith("op-")
+
     def to_dict(self) -> dict[str, Any]:
+        """Full dict for the local 0600 file (INCLUDES operator_secret — never send this
+        to the directory; the register payload is built explicitly elsewhere)."""
         return asdict(self)
+
+    def public_dict(self) -> dict[str, Any]:
+        """Directory-safe view: operator_id + created_at + display_name + integrity hash.
+        NEVER includes operator_secret or contact (private)."""
+        return {
+            "operator_id": self.operator_id,
+            "created_at": self.created_at,
+            "display_name": self.display_name,
+            "operator_integrity_hash": self.operator_integrity_hash,
+        }
 
 
 def operator_path() -> Path:
@@ -98,6 +155,9 @@ def load_operator() -> OperatorIdentity | None:
         created_at=data["created_at"],
         display_name=data.get("display_name", ""),
         contact=data.get("contact", ""),
+        # #464 — present on key-backed identities; absent on legacy op-<uuid> files.
+        operator_secret=data.get("operator_secret", ""),
+        operator_integrity_hash=data.get("operator_integrity_hash", ""),
     )
 
 
