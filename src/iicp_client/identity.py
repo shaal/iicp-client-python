@@ -130,6 +130,10 @@ class NodeIdentity:
     public_endpoint: str = ""
     auto_detect_nat: bool = False
     external_ip_probe_url: str = ""
+    # #456 — node_token cached after register so `iicp-node credits` can authenticate
+    # without re-registering. Bearer credential (not a key); stored in the chmod-600
+    # config. None until the node first registers via `serve`.
+    node_token: str | None = None
     created_at: str = field(default_factory=_now_iso)
 
     @classmethod

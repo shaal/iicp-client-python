@@ -247,7 +247,115 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Request timeout in milliseconds.",
     )
 
+    credits = sub.add_parser(
+        "credits",
+        help="Show this node's earned / spent / balance credits.",
+    )
+    credits.add_argument("--node", default=None, help="Load token + node_id from ~/.iicp/nodes/<NAME>.json")
+    credits.add_argument("--node-id", dest="node_id", default=None, help="Node id (if not using --node).")
+    credits.add_argument(
+        "--token",
+        default=_env("IICP_NODE_TOKEN", "") or None,
+        help="Node token. env: IICP_NODE_TOKEN",
+    )
+    credits.add_argument(
+        "--directory-url",
+        default=None,
+        help="IICP directory base URL (defaults to the saved node's / env / iicp.network).",
+    )
+    credits.add_argument("--json", action="store_true", help="Print the raw summary JSON.")
+    credits.add_argument(
+        "--verify",
+        action="store_true",
+        help="(next slice #456) cryptographically audit each award against the signed CREDIT_AWARD log.",
+    )
+
     return p
+
+
+async def _cmd_credits_async(args: argparse.Namespace) -> int:
+    """`iicp-node credits` — earned / spent / balance from the directory's
+    reconcile-checked GET /v1/credits/summary (#456). Figures come authenticated
+    from the directory (not the local config), so editing the saved file cannot
+    inflate them; `reconciles` flags a ledger that does not add up."""
+    import httpx
+
+    saved = load_node(args.node) if args.node else None
+    if args.node and saved is None:
+        sys.stderr.write(
+            f"ERROR: no saved config at ~/.iicp/nodes/{args.node}.json — run `iicp-node init` / `serve` first.\n"
+        )
+        return 1
+    node_id = args.node_id or (saved.node_id if saved else None)
+    token = args.token or (saved.node_token if saved else None)
+    directory_url = (
+        args.directory_url
+        or (saved.directory_url if saved else None)
+        or _env("IICP_DIRECTORY_URL", "https://iicp.network/api")
+    )
+    if not node_id:
+        sys.stderr.write("ERROR: node_id required (use --node NAME or --node-id ID)\n")
+        return 1
+    if not token:
+        sys.stderr.write(
+            "ERROR: no node_token — run `iicp-node serve` once (it caches the token), "
+            "or pass --token / $IICP_NODE_TOKEN\n"
+        )
+        return 1
+
+    url = directory_url.rstrip("/") + "/v1/credits/summary"
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                url, headers={"Authorization": f"Bearer {token}", "X-Node-Id": node_id}
+            )
+    except Exception as exc:  # noqa: BLE001
+        sys.stderr.write(f"ERROR: request failed: {exc}\n")
+        return 1
+
+    try:
+        body = resp.json()
+    except Exception:  # noqa: BLE001
+        sys.stderr.write(f"ERROR: bad response (HTTP {resp.status_code})\n")
+        return 1
+    if resp.status_code >= 400:
+        msg = (
+            (body.get("error") or {}).get("message", "request rejected")
+            if isinstance(body, dict)
+            else "request rejected"
+        )
+        sys.stderr.write(f"ERROR: HTTP {resp.status_code}: {msg}\n")
+        return 1
+
+    if args.json:
+        print(json.dumps(body, indent=2))
+        return 0
+
+    earned = float(body.get("total_earned", 0.0))
+    spent = float(body.get("total_spent", 0.0))
+    balance = float(body.get("balance", 0.0))
+    tx = int(body.get("tx_count", 0))
+    reconciles = bool(body.get("reconciles", False))
+    tpc = int(body.get("tokens_per_credit", 1000))
+    label = args.node or node_id
+    print(f"IICP credits — {label}")
+    print(f"  Earned (income)   {earned:>12.3f}")
+    print(f"  Spent             {spent:>12.3f}")
+    print("  ─────────────────────────────")
+    check = "✓ reconciles" if reconciles else "✗ DOES NOT RECONCILE"
+    print(f"  Balance           {balance:>12.3f}   {check}   (≈ {int(balance * tpc)} tokens)")
+    print(f"  {tx} transactions · `iicp-node credits --json` for raw")
+    if not reconciles:
+        sys.stderr.write(
+            "[iicp-node] WARNING: balance != earned − spent — the ledger does not "
+            "reconcile; do not trust these figures.\n"
+        )
+    if args.verify:
+        sys.stderr.write(
+            "[iicp-node] note: --verify (cryptographic audit vs the signed "
+            "CREDIT_AWARD log) is the next slice (#456).\n"
+        )
+    return 0
 
 
 async def _cmd_query_async(args: argparse.Namespace) -> int:
@@ -536,6 +644,16 @@ async def _serve(args: argparse.Namespace) -> int:
                 token = await node.register()
                 logger.info("Registered as %s (token=%s…)", node_id, (token or "")[:8])
                 _log_event(node_id, "register_ok", f"endpoint={public_endpoint}", _log_dir_override)
+                # #456 — cache the token in the saved config so `iicp-node credits` can
+                # authenticate later without re-registering (best-effort).
+                if getattr(args, "node", None) and token:
+                    saved = load_node(args.node)
+                    if saved is not None:
+                        saved.node_token = token
+                        try:
+                            save_node(saved)
+                        except OSError:
+                            pass
                 break
             except Exception as exc:  # noqa: BLE001
                 if attempt >= 3:
@@ -929,6 +1047,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_list(args)
     if args.cmd == "query":
         return asyncio.run(_cmd_query_async(args))
+    if args.cmd == "credits":
+        return asyncio.run(_cmd_credits_async(args))
     parser.error(f"unknown command: {args.cmd}")
     return 2
 
