@@ -267,7 +267,7 @@ def _build_parser() -> argparse.ArgumentParser:
     credits.add_argument(
         "--verify",
         action="store_true",
-        help="(next slice #456) cryptographically audit each award against the signed CREDIT_AWARD log.",
+        help="Cryptographically audit each award against the directory's signed CREDIT_AWARD log.",
     )
 
     return p
@@ -351,11 +351,87 @@ async def _cmd_credits_async(args: argparse.Namespace) -> int:
             "reconcile; do not trust these figures.\n"
         )
     if args.verify:
-        sys.stderr.write(
-            "[iicp-node] note: --verify (cryptographic audit vs the signed "
-            "CREDIT_AWARD log) is the next slice (#456).\n"
+        try:
+            vsum, vcount, vfailed = await _verify_credit_awards(directory_url, node_id)
+        except Exception as exc:  # noqa: BLE001
+            sys.stderr.write(f"[iicp-node] --verify failed: {exc}\n")
+            return 1
+        print("  ── cryptographic verification (signed CREDIT_AWARD log) ──")
+        if vfailed > 0:
+            sys.stderr.write(
+                f"[iicp-node] ✗ {vfailed} award event(s) FAILED Ed25519 verification — "
+                "tampered or inconsistent event log. Do NOT trust these figures.\n"
+            )
+            return 1
+        print(
+            f"  ✓ {vcount} award(s) cryptographically verified · {vsum:.3f} credits "
+            "(Ed25519, signed by the directory)"
         )
+        free_tier = earned - vsum
+        if free_tier > 0.0001:
+            print(
+                f"  · {free_tier:.3f} credits are free-tier allocation "
+                "(directory-granted, not signed task awards)"
+            )
     return 0
+
+
+async def _verify_credit_awards(directory_url: str, node_id: str) -> tuple[float, int, int]:
+    """#456 --verify: cryptographically confirm this node's CREDIT_AWARD income against the
+    directory's signed event log (defends against a lying directory). Resolves the directory's
+    Ed25519 key from /.well-known/did.json and re-derives + verifies each award signature.
+    Returns (verified_sum, verified_count, failed_count)."""
+    import base64
+    import hashlib
+    from urllib.parse import urlsplit
+
+    import httpx
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    sp = urlsplit(directory_url)
+    origin = f"{sp.scheme}://{sp.netloc}"  # did.json lives at the host root, not under /api
+    verified_sum, verified, failed = 0.0, 0, 0
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        did = (await client.get(f"{origin}/.well-known/did.json")).json()
+        x = did["verificationMethod"][0]["publicKeyJwk"]["x"]
+        pub = base64.urlsafe_b64decode(x + "=" * (-len(x) % 4))
+        vk = Ed25519PublicKey.from_public_bytes(pub)
+
+        since = 0
+        while True:
+            resp = await client.get(
+                f"{directory_url.rstrip('/')}/v1/events",
+                params={"event_types": "CREDIT_AWARD", "since_seq": since, "limit": 500},
+            )
+            events = resp.json().get("events", [])
+            if not events:
+                break
+            max_seq = since
+            for e in events:
+                seq = int(e.get("seq", 0))
+                max_seq = max(max_seq, seq)
+                if e.get("event_type") != "CREDIT_AWARD" or e.get("node_id") != node_id:
+                    continue
+                sig = e.get("sig")
+                if not sig:
+                    continue
+                payload = e.get("payload", {})
+                # Canonical form == the directory's (recursive key-sort, no-space, unescaped).
+                canon = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+                payload_hash = hashlib.sha256(canon.encode()).hexdigest()
+                signing_input = f'{e.get("event_id", "")}:CREDIT_AWARD:{seq}:{int(e.get("ts_ms", 0))}:{payload_hash}'
+                msg = hashlib.sha256(signing_input.encode()).digest()
+                try:
+                    vk.verify(bytes.fromhex(sig), msg)
+                    verified += 1
+                    verified_sum += float(payload.get("amount", 0.0))
+                except (InvalidSignature, ValueError):
+                    failed += 1
+            if len(events) < 500 or max_seq <= since:
+                break
+            since = max_seq
+    return verified_sum, verified, failed
 
 
 async def _cmd_query_async(args: argparse.Namespace) -> int:
