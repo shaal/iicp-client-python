@@ -28,7 +28,7 @@ import os
 import re
 import stat
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -82,10 +82,14 @@ class OperatorIdentity:
     created_at: str
     display_name: str = ""
     contact: str = ""
-    # #464 — base64 ed25519 private key (32-byte seed). Local-only secret.
+    # #464 — base64 ed25519 private key (32-byte seed). Local-only secret. Empty when the
+    # secret is sealed at rest (see operator_secret_enc, #460).
     operator_secret: str = ""
     # #464/#460 — SHA256(operator_id ':' created_at), pinned by the directory on first use.
     operator_integrity_hash: str = ""
+    # #460 — AES-256-GCM-sealed seed (PBKDF2-HMAC-SHA256 from a passphrase) when the operator
+    # opts into at-rest encryption; None for a plaintext (default/legacy) identity.
+    operator_secret_enc: dict[str, Any] | None = None
 
     @classmethod
     def generate(cls, *, display_name: str = "", contact: str = "") -> OperatorIdentity:
@@ -108,26 +112,61 @@ class OperatorIdentity:
     def compute_integrity_hash(operator_id: str, created_at: str) -> str:
         return hashlib.sha256(f"{operator_id}:{created_at}".encode()).hexdigest()
 
-    def signing_key(self):
-        """Return the ed25519 private key for signing delegations / mutations.
-        Raises if this is a legacy (keyless ``op-<uuid>``) identity — regenerate."""
+    def is_encrypted(self) -> bool:
+        """True when the seed is sealed at rest (#460) and a passphrase is needed to sign."""
+        return self.operator_secret_enc is not None and not self.operator_secret
+
+    def _seed_b64(self, passphrase: str | None) -> str:
+        """Resolve the base64 seed: plaintext if present, else decrypt the sealed seed with
+        ``passphrase`` (falling back to $IICP_OPERATOR_PASSPHRASE for headless serve)."""
+        if self.operator_secret:
+            return self.operator_secret
+        if self.operator_secret_enc is not None:
+            from iicp_client.operator_crypto import decrypt_seed, passphrase_from_env
+
+            pw = passphrase or passphrase_from_env()
+            if not pw:
+                raise ValueError(
+                    "operator secret is encrypted — set $IICP_OPERATOR_PASSPHRASE (or pass a "
+                    "passphrase) to unlock it (#460)"
+                )
+            return decrypt_seed(pw, self.operator_secret_enc, self.operator_id)
+        raise ValueError(
+            "legacy operator identity has no key (operator_id is a UUID, not a public key) — "
+            "regenerate with `iicp-node operator init` (#464)"
+        )
+
+    def signing_key(self, passphrase: str | None = None):
+        """Return the ed25519 private key for signing delegations / mutations. Decrypts the
+        sealed seed when the identity is encrypted (#460). Raises for a legacy keyless identity."""
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-        if not self.operator_secret:
-            raise ValueError(
-                "legacy operator identity has no key (operator_id is a UUID, not a public key) — "
-                "regenerate with `iicp-node operator init` (#464)"
-            )
-        return Ed25519PrivateKey.from_private_bytes(base64.b64decode(self.operator_secret))
+        return Ed25519PrivateKey.from_private_bytes(base64.b64decode(self._seed_b64(passphrase)))
 
     def is_key_backed(self) -> bool:
         """True when operator_id is a real ed25519 pubkey (not a legacy op-<uuid>)."""
-        return bool(self.operator_secret) and not self.operator_id.startswith("op-")
+        return (
+            bool(self.operator_secret) or self.operator_secret_enc is not None
+        ) and not self.operator_id.startswith("op-")
+
+    def encrypt_at_rest(self, passphrase: str) -> OperatorIdentity:
+        """Return a copy with the seed sealed under ``passphrase`` (operator_secret cleared, #460)."""
+        from iicp_client.operator_crypto import encrypt_seed
+
+        enc = encrypt_seed(passphrase, self._seed_b64(None), self.operator_id)
+        return replace(self, operator_secret="", operator_secret_enc=enc)
+
+    def decrypt_at_rest(self, passphrase: str) -> OperatorIdentity:
+        """Return a copy with the plaintext seed restored (operator_secret_enc cleared, #460)."""
+        return replace(self, operator_secret=self._seed_b64(passphrase), operator_secret_enc=None)
 
     def to_dict(self) -> dict[str, Any]:
         """Full dict for the local 0600 file (INCLUDES operator_secret — never send this
         to the directory; the register payload is built explicitly elsewhere)."""
-        return asdict(self)
+        d = asdict(self)
+        if d.get("operator_secret_enc") is None:
+            d.pop("operator_secret_enc", None)  # keep plaintext files unchanged
+        return d
 
     def public_dict(self) -> dict[str, Any]:
         """Directory-safe view: operator_id + created_at + display_name + integrity hash.
@@ -158,6 +197,8 @@ def load_operator() -> OperatorIdentity | None:
         # #464 — present on key-backed identities; absent on legacy op-<uuid> files.
         operator_secret=data.get("operator_secret", ""),
         operator_integrity_hash=data.get("operator_integrity_hash", ""),
+        # #460 — sealed seed when the operator opted into at-rest encryption.
+        operator_secret_enc=data.get("operator_secret_enc"),
     )
 
 

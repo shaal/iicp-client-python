@@ -284,6 +284,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="IICP directory base URL (defaults to env / iicp.network).",
     )
+    op_sub.add_parser(
+        "encrypt",
+        help="Password-encrypt the operator secret at rest (#460). Set $IICP_OPERATOR_PASSPHRASE "
+        "to unlock it headlessly during `serve`.",
+    )
+    op_sub.add_parser("decrypt", help="Remove at-rest encryption — restore the plaintext secret.")
 
     return p
 
@@ -447,6 +453,70 @@ async def _cmd_operator_rename_async(args: argparse.Namespace) -> int:
     op.display_name = body.get("display_name", new_name) if isinstance(body, dict) else new_name
     save_operator(op)
     print(f"Renamed operator display_name to {op.display_name!r}.")
+    return 0
+
+
+def _operator_passphrase(prompt: str, *, confirm: bool) -> str | None:
+    """Resolve a passphrase: $IICP_OPERATOR_PASSPHRASE if set (headless/CI), else an
+    interactive getpass prompt (this command is operator-run, so a prompt is fine here —
+    only `serve` must stay non-interactive)."""
+    import getpass
+    import os
+
+    env = os.environ.get("IICP_OPERATOR_PASSPHRASE")
+    if env:
+        return env
+    pw = getpass.getpass(prompt)
+    if confirm and pw != getpass.getpass("Confirm passphrase: "):
+        sys.stderr.write("ERROR: passphrases do not match.\n")
+        return None
+    return pw or None
+
+
+def _cmd_operator_encrypt(args: argparse.Namespace) -> int:
+    """`iicp-node operator encrypt` (#460) — seal the operator secret at rest under a passphrase."""
+    op = load_operator()
+    if op is None:
+        sys.stderr.write("ERROR: no operator identity — run `iicp-node init` first.\n")
+        return 1
+    if op.is_encrypted():
+        sys.stdout.write("Operator secret is already encrypted at rest.\n")
+        return 0
+    if not op.is_key_backed():
+        sys.stderr.write("ERROR: legacy keyless operator identity has nothing to encrypt (#464).\n")
+        return 1
+    pw = _operator_passphrase("New operator passphrase: ", confirm=True)
+    if not pw:
+        sys.stderr.write("ERROR: a non-empty passphrase is required.\n")
+        return 1
+    save_operator(op.encrypt_at_rest(pw))
+    sys.stdout.write(
+        "Operator secret encrypted at rest (AES-256-GCM / PBKDF2). Set $IICP_OPERATOR_PASSPHRASE "
+        "to unlock it headlessly during `serve`.\n"
+    )
+    return 0
+
+
+def _cmd_operator_decrypt(args: argparse.Namespace) -> int:
+    """`iicp-node operator decrypt` (#460) — restore the plaintext secret at rest."""
+    op = load_operator()
+    if op is None:
+        sys.stderr.write("ERROR: no operator identity — run `iicp-node init` first.\n")
+        return 1
+    if not op.is_encrypted():
+        sys.stdout.write("Operator secret is already stored in plaintext.\n")
+        return 0
+    pw = _operator_passphrase("Operator passphrase: ", confirm=False)
+    if not pw:
+        sys.stderr.write("ERROR: a passphrase is required to decrypt.\n")
+        return 1
+    try:
+        plain = op.decrypt_at_rest(pw)
+    except ValueError as exc:
+        sys.stderr.write(f"ERROR: {exc}\n")
+        return 1
+    save_operator(plain)
+    sys.stdout.write("Operator secret decrypted (now stored in plaintext at rest).\n")
     return 0
 
 
@@ -1243,6 +1313,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "operator":
         if args.op_cmd == "rename":
             return asyncio.run(_cmd_operator_rename_async(args))
+        if args.op_cmd == "encrypt":
+            return _cmd_operator_encrypt(args)
+        if args.op_cmd == "decrypt":
+            return _cmd_operator_decrypt(args)
         parser.error(f"unknown operator subcommand: {args.op_cmd}")
     parser.error(f"unknown command: {args.cmd}")
     return 2
