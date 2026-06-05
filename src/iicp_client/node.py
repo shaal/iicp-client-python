@@ -21,6 +21,7 @@ import hashlib
 import hmac
 import json
 import logging
+import socket
 import threading
 import time
 from collections.abc import Callable, Coroutine
@@ -28,17 +29,34 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
 from iicp_client.availability import AvailabilityEvaluator, Window
 from iicp_client.idempotency import IdempotencyGuard
+from iicp_client.iicp_tcp import IICP_MAGIC, IicpTcpServer  # #457 single-port multiplexer
 from iicp_client.peer_manager import PeerManager
 from iicp_client.scheduler import QUEUE_WAIT_S, is_queue_eligible
 
 logger = logging.getLogger(__name__)
 
 _EMBEDDING_INTENT = "urn:iicp:intent:llm:embedding:v1"
+
+
+def derive_native_endpoint(endpoint: str) -> str | None:
+    """#457 / ADR-040 — derive the native binary transport_endpoint from the HTTP `endpoint`.
+
+    They share one host:port (serve() multiplexes both planes on one socket via first-byte
+    detection), so the native URI is the same authority with the ``iicp`` scheme (``iicpsec``
+    for TLS). Returns None if `endpoint` is not a parseable http(s) URL.
+    """
+    parts = urlsplit(endpoint)
+    if parts.scheme == "http" and parts.netloc:
+        return f"iicp://{parts.netloc}"
+    if parts.scheme == "https" and parts.netloc:
+        return f"iicpsec://{parts.netloc}"
+    return None
 
 
 def _intent_for_model(model: str, default_intent: str) -> str:
@@ -930,8 +948,73 @@ class IicpNode:
                 self.end_headers()
                 self.wfile.write(body)
 
-        server = ThreadingHTTPServer((host, port), _Handler)
-        logger.info("IICP node %s listening on %s:%d", self._cfg.node_id, host, port)
+        # #457 / ADR-040 — single-port multiplexer: the HTTP control plane and the native
+        # IICP binary transport share ONE socket. Each accepted connection's first 4 bytes
+        # are peeked (MSG_PEEK, non-consuming): the IICP frame magic "IICP" routes to the
+        # native handler (the SAME backend task handler as HTTP), anything else (an HTTP
+        # request line) to the BaseHTTPRequestHandler above. One socket ⇒ one pinhole ⇒
+        # native is reachable exactly when HTTP is (advertise-when-reachable); a CGNAT node
+        # needs no second hole. bind_and_activate=False: we own the listening socket.
+        server = ThreadingHTTPServer((host, port), _Handler, bind_and_activate=False)
+        native_server = IicpTcpServer(
+            host=host, port=port, node_id=self._cfg.node_id, handler=handler
+        )
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind((host, port))
+        listener.listen(128)
+        listener.settimeout(0.5)  # so the accept loop notices shutdown promptly
+        mux_stop = threading.Event()
+
+        async def _handle_native_conn(conn: socket.socket) -> None:
+            try:
+                conn.setblocking(False)
+                reader, writer = await asyncio.open_connection(sock=conn)
+                await native_server._handle_connection(reader, writer)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("native IICP connection error: %s", exc)
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+
+        def _route_conn(conn: socket.socket, addr: Any) -> None:
+            try:
+                conn.settimeout(10.0)
+                # Wait for the full 4-byte prefix without consuming it; the chosen consumer
+                # then parses from the start. MSG_WAITALL avoids misrouting on a fragmented magic.
+                prefix = conn.recv(4, socket.MSG_PEEK | socket.MSG_WAITALL)
+            except OSError:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+                return
+            conn.settimeout(None)
+            if prefix == IICP_MAGIC:
+                asyncio.run_coroutine_threadsafe(_handle_native_conn(conn), loop)
+            else:
+                # ThreadingHTTPServer.process_request threads the request; _Handler reads the
+                # connection from the start (MSG_PEEK left the bytes in the kernel buffer).
+                server.process_request(conn, addr)
+
+        def _accept_loop() -> None:
+            while not mux_stop.is_set():
+                try:
+                    conn, addr = listener.accept()
+                except TimeoutError:
+                    continue
+                except OSError:
+                    break
+                # Peek+route off the accept thread so a slow client can't block new connections.
+                threading.Thread(target=_route_conn, args=(conn, addr), daemon=True).start()
+
+        logger.info(
+            "IICP node %s listening on %s:%d (HTTP + native IICP, single port)",
+            self._cfg.node_id,
+            host,
+            port,
+        )
 
         bg_tasks: list[asyncio.Task] = []
         # #404 — start the heartbeat loop when a token is present OR empty (register
@@ -1025,17 +1108,25 @@ class IicpNode:
             logger.info("Relay worker started → %s:%d", _relay_host, _relay_port_n)
 
         try:
-            await loop.run_in_executor(None, server.serve_forever)
+            # #457 — run the single-port accept/route loop (replaces server.serve_forever;
+            # the HTTP server never binds its own socket — we feed it routed connections).
+            await loop.run_in_executor(None, _accept_loop)
         finally:
-            # BUG-3 fix: cancel background tasks BEFORE server.shutdown() so the
-            # gossip/heartbeat coroutines stop scheduling futures onto the event
-            # loop during interpreter teardown — silences the "cannot schedule new
-            # futures after interpreter shutdown" noise on CTRL-C / normal exit.
+            # BUG-3 fix: cancel background tasks BEFORE teardown so the gossip/heartbeat
+            # coroutines stop scheduling futures onto the event loop during interpreter
+            # teardown — silences the "cannot schedule new futures after interpreter
+            # shutdown" noise on CTRL-C / normal exit.
             for t in bg_tasks:
                 t.cancel()
             if bg_tasks:
                 await asyncio.gather(*bg_tasks, return_exceptions=True)
-            server.shutdown()
+            # #457 — stop the multiplexer accept loop + close the listening socket.
+            mux_stop.set()
+            try:
+                listener.close()
+            except OSError:
+                pass
+            server.server_close()
             # #343 — graceful pinhole revoke. Best-effort; failure here is
             # never fatal because router lease auto-expires (3600s default).
             self._revoke_pinhole_sync()

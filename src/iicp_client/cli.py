@@ -716,6 +716,18 @@ async def _serve(args: argparse.Namespace) -> int:
         logger.error(str(exc))
         return 2
 
+    # #457 / ADR-040 — advertise the native IICP binary transport. serve() multiplexes it
+    # onto the SAME socket as HTTP (first-byte detection), so transport_endpoint shares the
+    # endpoint's host:port with the iicp:// scheme. Derived from the FINAL endpoint (after NAT
+    # profile application); register() only sends it when registering (skip_registration gates
+    # the non-routable case) → advertise-when-reachable. Opt out: IICP_DISABLE_NATIVE_TRANSPORT=1.
+    if not args.skip_registration and os.environ.get("IICP_DISABLE_NATIVE_TRANSPORT") != "1":
+        from iicp_client.node import derive_native_endpoint
+
+        _native_ep = derive_native_endpoint(node._cfg.endpoint)
+        if _native_ep:
+            node._cfg.transport_endpoint = _native_ep
+
     # #404 — register with bounded backoff retry. On persistent failure, pass an
     # empty token (NOT None) so the heartbeat loop still starts and re-registers on
     # the first 401 (#399 path) once the directory is reachable — the self-healing
