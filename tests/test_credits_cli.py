@@ -74,12 +74,14 @@ def _make_signed_events(sk: Ed25519PrivateKey, payload: dict):
     pub = sk.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
     pub_b64 = base64.urlsafe_b64encode(pub).decode().rstrip("=")
     event_id, seq, ts_ms = "11111111-1111-1111-1111-111111111111", 2, 1_700_000_000_000
+    # #458: genesis-case hash-chain link, bound into the signing input.
+    prev_hash = "c44802bedf3e63b5a3f1634c5d19263634f92f26dd15401b09b06dd53a80cf9d"
     canon = _json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     ph = hashlib.sha256(canon.encode()).hexdigest()
-    msg = hashlib.sha256(f"{event_id}:CREDIT_AWARD:{seq}:{ts_ms}:{ph}".encode()).digest()
+    msg = hashlib.sha256(f"{event_id}:CREDIT_AWARD:{seq}:{ts_ms}:{ph}:{prev_hash}".encode()).digest()
     sig = sk.sign(msg).hex()
     ev = {"event_id": event_id, "event_type": "CREDIT_AWARD", "seq": seq, "ts_ms": ts_ms,
-          "node_id": "n1", "payload": payload, "sig": sig}
+          "node_id": "n1", "payload": payload, "prev_hash": prev_hash, "sig": sig}
     return pub_b64, {"events": [ev]}
 
 

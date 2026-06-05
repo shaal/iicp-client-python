@@ -389,6 +389,9 @@ async def _verify_credit_awards(directory_url: str, node_id: str) -> tuple[float
     from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+    # #458 hash-chain genesis root: SHA256_hex("iicp:dir:event-log:genesis:v1"). Bound into the
+    # signing input as prev_hash for a genesis/legacy event; the directory serves the real link otherwise.
+    genesis_root = "c44802bedf3e63b5a3f1634c5d19263634f92f26dd15401b09b06dd53a80cf9d"
     sp = urlsplit(directory_url)
     origin = f"{sp.scheme}://{sp.netloc}"  # did.json lives at the host root, not under /api
     verified_sum, verified, failed = 0.0, 0, 0
@@ -420,7 +423,12 @@ async def _verify_credit_awards(directory_url: str, node_id: str) -> tuple[float
                 # Canonical form == the directory's (recursive key-sort, no-space, unescaped).
                 canon = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
                 payload_hash = hashlib.sha256(canon.encode()).hexdigest()
-                signing_input = f'{e.get("event_id", "")}:CREDIT_AWARD:{seq}:{int(e.get("ts_ms", 0))}:{payload_hash}'
+                # #458: prev_hash (tamper-evident chain) is bound into the signing input.
+                prev_hash = e.get("prev_hash") or genesis_root
+                signing_input = (
+                    f'{e.get("event_id", "")}:CREDIT_AWARD:{seq}:{int(e.get("ts_ms", 0))}'
+                    f":{payload_hash}:{prev_hash}"
+                )
                 msg = hashlib.sha256(signing_input.encode()).digest()
                 try:
                     vk.verify(bytes.fromhex(sig), msg)
