@@ -315,6 +315,30 @@ IICP_EXTERNAL_IP_PROBE_URL=https://api.ipify.org  # WAN IP probe (default)
 
 ---
 
+## Operator identity
+
+Your **operator identity** is an ed25519 keypair — its public key *is* your `operator_id` (the
+directory stores it as `operator_pubkey`). One identity spans every node you run: it binds them to
+you (nodes show **`Operated by <your name>` ✓**), earns a
+[founder ordinal](https://iicp.network/founders), and rolls each node's credits into one operator
+wallet. Your `display_name` is the public, mutable handle; your contact stays local.
+
+```bash
+iicp-node init                       # create your key-backed identity (~/.iicp/operator.json)
+iicp-node serve --node mynode        # signs an operator→node delegation; binds the node to you
+iicp-node operator rename "NewName"  # change your public display_name (signed)
+iicp-node operator encrypt           # password-encrypt the secret at rest ($IICP_OPERATOR_PASSPHRASE)
+iicp-node operator decrypt           # remove at-rest encryption
+```
+
+**The key is the identity** — whoever holds `~/.iicp/operator.json` controls it (its nodes, ordinal,
+and wallet); there is no central recovery. Back it up (encrypted), never commit or share it; lose it
+and the identity, with its founder ordinal, is gone.
+
+Full guide: **[iicp.network/docs/operator-identity](https://iicp.network/docs/operator-identity)**
+
+---
+
 ## SDK conformance
 
 | Rule | Description | Status |
