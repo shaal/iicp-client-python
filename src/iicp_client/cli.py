@@ -614,7 +614,8 @@ async def _cmd_query_async(args: argparse.Namespace) -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
-    if resp.status == "completed" and resp.result:
+    # Spec terminal success status is "success" (was "completed"); accept both.
+    if resp.status in ("success", "completed") and resp.result:
         content = resp.result.get("content") or json.dumps(resp.result, indent=2)
         print(content)
         if resp.metrics and resp.metrics.node_id:
