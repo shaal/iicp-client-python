@@ -358,7 +358,7 @@ Conformance tier: `iicp:sdk:v1` (spec S.14) · [Request a badge](https://iicp.ne
 
 ```bash
 pip install -e ".[dev]"   # install with dev deps
-pytest tests/ -v          # run 255 unit tests
+pytest tests/ -v          # run the unit suite
 ruff check src tests       # lint
 ```
 
