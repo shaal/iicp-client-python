@@ -59,6 +59,23 @@ def derive_native_endpoint(endpoint: str) -> str | None:
     return None
 
 
+def _listen_family(host: str, port: int) -> int:
+    """Resolve the socket address family to bind for ``host``.
+
+    The CLI defaults ``--host``/``IICP_HOST`` to ``"::"`` (IPv6 any). Binding that
+    to a hardcoded ``AF_INET`` socket raises ``gaierror: Address family for hostname
+    not supported``, so derive the family from the host instead: ``"0.0.0.0"`` →
+    ``AF_INET``, ``"::"`` → ``AF_INET6``, ``"127.0.0.1"`` → ``AF_INET``, hostnames →
+    whatever they resolve to. ``AI_PASSIVE`` makes an empty/wildcard host resolve to
+    a bindable wildcard address. Falls back to ``AF_INET`` if resolution yields nothing.
+    """
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE)
+    except socket.gaierror:
+        return socket.AF_INET
+    return infos[0][0] if infos else socket.AF_INET
+
+
 def _intent_for_model(model: str, default_intent: str) -> str:
     """#409 — classify a backend model to the IICP intent it serves.
 
@@ -974,8 +991,22 @@ class IicpNode:
         native_server = IicpTcpServer(
             host=host, port=port, node_id=self._cfg.node_id, handler=handler
         )
-        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # Bind to the address family implied by `host` — the CLI defaults host to
+        # "::" (IPv6), which a hardcoded AF_INET socket cannot bind (gaierror).
+        family = _listen_family(host, port)
+        # Keep the HTTP server's notion of the family consistent with the socket we
+        # own; server_close()/process_request never re-bind, but this avoids any
+        # AF_INET-vs-IPv6 mismatch if the stdlib ever consults address_family.
+        server.address_family = family
+        listener = socket.socket(family, socket.SOCK_STREAM)
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if family == socket.AF_INET6:
+            # Dual-stack: a "::" bind should also accept IPv4-mapped clients.
+            # Best-effort — some platforms reject toggling V6ONLY.
+            try:
+                listener.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+            except OSError:
+                pass
         listener.bind((host, port))
         listener.listen(128)
         listener.settimeout(0.5)  # so the accept loop notices shutdown promptly
