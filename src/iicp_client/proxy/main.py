@@ -5,7 +5,7 @@ This is the FastAPI application that constitutes the Client Plane. It bridges
 client requests into IICP CALL messages and routes them to the best available
 adapter node discovered through the directory.
 
-Three inbound protocol surfaces are exposed on port 11434:
+Three inbound protocol surfaces are exposed on port 9483 (reserved IICP proxy band):
   - OpenAI-compat:   POST /v1/chat/completions (ChatGPT SDK, LangChain, LlamaIndex, liteLLM)
   - Ollama-compat:   POST /api/chat, POST /api/generate (Open WebUI, Continue.dev, aider, Jan)
   - Anthropic-compat: POST /v1/messages (Anthropic SDK with base_url override)
