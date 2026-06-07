@@ -90,6 +90,10 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser(
+        "help",
+        help="Print this top-level usage and exit.",
+    )
+    sub.add_parser(
         "init",
         help="Interactive wizard — set up operator identity + first node config.",
     )
@@ -157,8 +161,13 @@ def _build_parser() -> argparse.ArgumentParser:
     serve.add_argument(
         "--max-concurrent",
         type=int,
-        default=int(_env("IICP_MAX_CONCURRENT", "4") or "4"),
-        help="Concurrent task cap (excess gets 429 IICP-E021). env: IICP_MAX_CONCURRENT",
+        # default=None as a "not supplied" sentinel so a saved-node value can be
+        # restored; the env/built-in default (4) is applied AFTER saved-config
+        # restore in _serve(). Passing the default value on the CLI no longer
+        # silently loses to the saved config.
+        default=None,
+        help="Concurrent task cap (excess gets 429 IICP-E021). "
+        "env: IICP_MAX_CONCURRENT (default 4)",
     )
     serve.add_argument(
         "--node-id",
@@ -168,13 +177,19 @@ def _build_parser() -> argparse.ArgumentParser:
     serve.add_argument(
         "--port",
         type=int,
-        default=int(_env("IICP_PORT", "9484") or "9484"),
-        help="HTTP listen port. env: IICP_PORT",
+        # default=None sentinel — see --max-concurrent. env/built-in (9484) applied
+        # after saved-config restore in _serve().
+        default=None,
+        help="HTTP listen port. env: IICP_PORT (default 9484)",
     )
     serve.add_argument(
         "--host",
-        default=_env("IICP_HOST", "::"),
-        help="HTTP bind host. env: IICP_HOST",
+        # default=None sentinel — see --max-concurrent. env/built-in (::) applied
+        # after saved-config restore in _serve(). Fixes the prior bug where the
+        # restore guard compared against "0.0.0.0" but the default was "::", so a
+        # saved host was never restored.
+        default=None,
+        help="HTTP bind host. env: IICP_HOST (default ::)",
     )
     serve.add_argument(
         "--skip-registration",
@@ -190,13 +205,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     serve.add_argument(
         "--auto-detect-nat",
-        action="store_true",
-        # Default ON: auto-detection runs unless operator explicitly sets
-        # --public-endpoint or disables via IICP_AUTO_DETECT_NAT=false.
+        action=argparse.BooleanOptionalAction,
+        # Default ON: auto-detection runs unless operator passes
+        # --no-auto-detect-nat, sets --public-endpoint, or disables via
+        # IICP_AUTO_DETECT_NAT=false. BooleanOptionalAction registers both
+        # --auto-detect-nat and --no-auto-detect-nat so the CLI off-switch works.
         default=(_env("IICP_AUTO_DETECT_NAT", "true") or "true").lower() != "false",
         help="Run detect_nat() at startup to claim a public endpoint via "
         "UPnP / external-IP probe. Overrides --public-endpoint when a higher-"
-        "tier endpoint is discovered. Default: ON. env: IICP_AUTO_DETECT_NAT",
+        "tier endpoint is discovered. Disable with --no-auto-detect-nat. "
+        "Default: ON. env: IICP_AUTO_DETECT_NAT",
     )
     serve.add_argument(
         "--external-ip-probe-url",
@@ -333,6 +351,17 @@ async def _cmd_credits_async(args: argparse.Namespace) -> int:
             f"ERROR: no saved config at ~/.iicp/nodes/{args.node}.json — run `iicp-node init` / `serve` first.\n"
         )
         return 1
+    # UX: with no --node / --node-id, fall back to a saved config so a bare
+    # `iicp-node credits` just works for the common single-node setup. Prefer an
+    # explicit `default.json`; otherwise use the sole saved node if exactly one
+    # exists. Ambiguity (≥2 nodes) is left to the clear error below.
+    if saved is None and not args.node_id:
+        all_nodes = list_nodes()
+        default_node = next((n for n in all_nodes if n.name == "default"), None)
+        if default_node is not None:
+            saved = default_node
+        elif len(all_nodes) == 1:
+            saved = all_nodes[0]
     node_id = args.node_id or (saved.node_id if saved else None)
     token = args.token or (saved.node_token if saved else None)
     directory_url = (
@@ -341,7 +370,20 @@ async def _cmd_credits_async(args: argparse.Namespace) -> int:
         or _env("IICP_DIRECTORY_URL", "https://iicp.network/api")
     )
     if not node_id:
-        sys.stderr.write("ERROR: node_id required (use --node NAME or --node-id ID)\n")
+        names = [n.name for n in list_nodes()]
+        if names:
+            sys.stderr.write(
+                "ERROR: node_id required — multiple saved node configs exist, so the "
+                "node is ambiguous.\n"
+                f"  Saved nodes: {', '.join(names)}\n"
+                "  Re-run with `--node <NAME>` (or `--node-id <ID>`).\n"
+            )
+        else:
+            sys.stderr.write(
+                "ERROR: node_id required (use --node NAME or --node-id ID).\n"
+                "  No saved node configs found under ~/.iicp/nodes/ — run "
+                "`iicp-node init` first.\n"
+            )
         return 1
     if not token:
         sys.stderr.write(
@@ -683,16 +725,38 @@ async def _serve(args: argparse.Namespace) -> int:
         args.region = args.region or saved.region
         args.intent = args.intent or saved.intent
         args.node_id = args.node_id or saved.node_id
-        if args.max_concurrent == 4:
+        # Sentinel restore: --host/--port/--max-concurrent default to None when not
+        # supplied on the CLI. Precedence is flag > env > saved-config > built-in.
+        # The env value (if set) wins over the saved config; otherwise restore the
+        # saved value. Built-in defaults are applied below for the all-unset case.
+        if args.max_concurrent is None and _env("IICP_MAX_CONCURRENT") is None:
             args.max_concurrent = saved.max_concurrent
-        if args.port == 9484:
+        if args.port is None and _env("IICP_PORT") is None:
             args.port = saved.port
-        if args.host == "0.0.0.0":
+        if args.host is None and _env("IICP_HOST") is None:
             args.host = saved.host
-        if not args.auto_detect_nat and saved.auto_detect_nat:
+        # auto_detect_nat is a real bool (BooleanOptionalAction). Only restore the
+        # saved opt-in when the operator did not pass --auto-detect-nat /
+        # --no-auto-detect-nat and no env override is set — otherwise the explicit
+        # CLI/env choice (including the --no- off-switch) is honoured.
+        if (
+            getattr(args, "auto_detect_nat_explicit", None) is None
+            and _env("IICP_AUTO_DETECT_NAT") is None
+            and not args.auto_detect_nat
+            and saved.auto_detect_nat
+        ):
             args.auto_detect_nat = True
         if not args.external_ip_probe_url and saved.external_ip_probe_url:
             args.external_ip_probe_url = saved.external_ip_probe_url
+
+    # Apply env / built-in defaults for any sentinel still unset (no saved config,
+    # or saved config did not provide the value). flag > env > built-in.
+    if args.max_concurrent is None:
+        args.max_concurrent = int(_env("IICP_MAX_CONCURRENT", "4") or "4")
+    if args.port is None:
+        args.port = int(_env("IICP_PORT", "9484") or "9484")
+    if args.host is None:
+        args.host = _env("IICP_HOST", "::")
 
     # #410 — built-in fallback applied LAST (after flag/env/saved-config), so the
     # Ollama default never shadows a saved-node backend_url. #414/C1 — an `anthropic`
@@ -1385,8 +1449,21 @@ def _cmd_proxy(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
+    raw_argv = sys.argv[1:] if argv is None else argv
     args = parser.parse_args(argv)
+    if args.cmd == "help":
+        parser.print_help()
+        return 0
     if args.cmd == "serve":
+        # Record whether the operator explicitly toggled the NAT flag on the CLI
+        # so saved-config restore can honour an explicit --no-auto-detect-nat
+        # rather than silently restoring a saved opt-in. (BooleanOptionalAction
+        # collapses the on/off forms to a plain bool, losing explicitness.)
+        args.auto_detect_nat_explicit = (
+            True
+            if ("--auto-detect-nat" in raw_argv or "--no-auto-detect-nat" in raw_argv)
+            else None
+        )
         return asyncio.run(_serve(args))
     if args.cmd == "proxy":
         return _cmd_proxy(args)
