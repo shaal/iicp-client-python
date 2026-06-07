@@ -25,6 +25,9 @@ classifiers = [
 ]
 dependencies = [
     "httpx>=0.27",
+    # identity.py imports Ed25519PrivateKey unconditionally on the operator
+    # identity path that `iicp-node init` always exercises — core, not optional.
+    "cryptography>=42",
 ]
 
 [project.scripts]
