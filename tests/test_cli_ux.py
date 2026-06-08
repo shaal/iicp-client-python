@@ -278,3 +278,43 @@ def test_serve_backend_url_anthropic_default(iicp_home, monkeypatch):
 def test_serve_explicit_backend_url_wins(iicp_home, monkeypatch):
     url = _resolve_backend_url(monkeypatch, "--backend-url", "http://example.test:1234")
     assert url == "http://example.test:1234"
+
+
+# --------------------------------------------------------------------------- #
+# Fix WQ-066 — `serve --relay-capable` flag (0.7.45)
+# --------------------------------------------------------------------------- #
+
+def test_relay_capable_flag_parses(monkeypatch):
+    """--relay-capable sets relay_capable=True on the parsed namespace (0.7.45).
+    Without the fix, argparse raises 'unrecognized arguments' → test fails."""
+    monkeypatch.delenv("IICP_RELAY_CAPABLE", raising=False)
+    args = _parse_serve("--relay-capable", monkeypatch=monkeypatch)
+    assert args.relay_capable is True
+
+
+def test_relay_capable_default_off(monkeypatch):
+    """relay_capable defaults to False when flag and env are absent."""
+    monkeypatch.delenv("IICP_RELAY_CAPABLE", raising=False)
+    args = _parse_serve(monkeypatch=monkeypatch)
+    assert args.relay_capable is False
+
+
+def test_relay_capable_env_var(monkeypatch):
+    """IICP_RELAY_CAPABLE=1 enables relay_capable without the CLI flag."""
+    monkeypatch.setenv("IICP_RELAY_CAPABLE", "1")
+    args = _parse_serve(monkeypatch=monkeypatch)
+    assert args.relay_capable is True
+
+
+def test_relay_accept_port_flag_parses(monkeypatch):
+    """--relay-accept-port sets relay_accept_port to the given integer."""
+    monkeypatch.delenv("IICP_RELAY_ACCEPT_PORT", raising=False)
+    args = _parse_serve("--relay-accept-port", "9490", monkeypatch=monkeypatch)
+    assert args.relay_accept_port == 9490
+
+
+def test_relay_accept_port_default(monkeypatch):
+    """relay_accept_port defaults to 9485 when flag and env are absent."""
+    monkeypatch.delenv("IICP_RELAY_ACCEPT_PORT", raising=False)
+    args = _parse_serve(monkeypatch=monkeypatch)
+    assert args.relay_accept_port == 9485

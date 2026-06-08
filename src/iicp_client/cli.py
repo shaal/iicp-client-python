@@ -236,6 +236,22 @@ def _build_parser() -> argparse.ArgumentParser:
         "operators behind CGNAT. env: IICP_RELAY_WORKER_ENDPOINT",
     )
     serve.add_argument(
+        "--relay-capable",
+        action=argparse.BooleanOptionalAction,
+        default=bool(_env("IICP_RELAY_CAPABLE", "").lower() in ("1", "true", "yes")),
+        help="Advertise this node as a relay server for CGNAT/tier-4 operators. "
+        "Opens relay_accept_port (default 9485) and registers relay_capable=true "
+        "in the directory. Use with a publicly routable endpoint (direct or "
+        "Cloudflare Tunnel). env: IICP_RELAY_CAPABLE",
+    )
+    serve.add_argument(
+        "--relay-accept-port",
+        type=int,
+        default=int(_env("IICP_RELAY_ACCEPT_PORT", "9485")),
+        help="TCP port for the relay accept server (only used with --relay-capable). "
+        "Default: 9485. env: IICP_RELAY_ACCEPT_PORT",
+    )
+    serve.add_argument(
         "--log-dir",
         default=_env("IICP_LOG_DIR"),
         help="Directory for persistent log files (<node_id>.log + events.jsonl). "
@@ -886,6 +902,8 @@ async def _serve(args: argparse.Namespace) -> int:
         directory_url=args.directory_url,
         max_concurrent=args.max_concurrent,
         relay_worker_endpoint=relay_worker_ep or None,
+        relay_capable=getattr(args, "relay_capable", False),
+        relay_accept_port=getattr(args, "relay_accept_port", 9485),
         operator_delegation=_op_delegation,
         operator_display_name=_op_display_name,
         operator_created_at=_op_created_at,
