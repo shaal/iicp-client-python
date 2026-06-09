@@ -38,6 +38,8 @@ class TaskRequest:
     payload: dict[str, Any]
     constraints: TaskConstraints = field(default_factory=TaskConstraints)
     auth: TaskAuth = field(default_factory=TaskAuth)
+    # #488 — requester node identity for self-query neutrality at the directory.
+    source_node_id: str | None = None
 
 
 @dataclass

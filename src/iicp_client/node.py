@@ -53,12 +53,16 @@ async def _post_cip_receipt(
     task_id: str,
     tokens_used: int,
     result: dict[str, Any],
+    querying_node_id: str | None = None,
 ) -> None:
     """TC-9c: best-effort CIPWorkerReceipt POST to /v1/credits/award.
 
     Server-side credit award path — the node reports task completion directly
     so the directory credits the provider wallet without proxy forwarding.
     Fire-and-forget: errors are suppressed so they never affect the task response.
+
+    querying_node_id (#488): when set, the directory uses it to detect same-operator
+    self-queries and returns excluded=true instead of awarding credits.
     """
     import secrets as _secrets
     from datetime import UTC, datetime, timedelta
@@ -81,23 +85,28 @@ async def _post_cip_receipt(
     # amount = tokens / 1000.0; floor at 0.001 to satisfy directory min:0.0001.
     amount = max(tokens_used, 1) / 1000.0
 
+    body: dict[str, Any] = {
+        "node_id": node_id,
+        "task_id": task_id,
+        "tokens_used": tokens_used,
+        "amount": round(amount, 4),
+        "nonce": nonce,
+        "expires_at": expires_at,
+        "signature": signature,
+        "response_hash": response_hash,
+        "reason": "task_completion",
+    }
+    # #488: include querying_node_id for self-query neutrality detection at the directory.
+    if querying_node_id:
+        body["querying_node_id"] = querying_node_id
+
     url = directory_url.rstrip("/") + "/v1/credits/award"
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             await client.post(
                 url,
                 headers={"Authorization": f"Bearer {token}"},
-                json={
-                    "node_id": node_id,
-                    "task_id": task_id,
-                    "tokens_used": tokens_used,
-                    "amount": round(amount, 4),
-                    "nonce": nonce,
-                    "expires_at": expires_at,
-                    "signature": signature,
-                    "response_hash": response_hash,
-                    "reason": "task_completion",
-                },
+                json=body,
             )
     except Exception:  # noqa: BLE001
         pass  # best-effort: never propagate to caller
@@ -1028,6 +1037,8 @@ class IicpNode:
                                     task_id=task_id,
                                     tokens_used=tokens,
                                     result=result,
+                                    # #488: pass requester identity for self-query detection.
+                                    querying_node_id=body.get("source_node_id"),
                                 ),
                                 loop,
                             )

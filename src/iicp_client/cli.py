@@ -288,6 +288,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default=60_000,
         help="Request timeout in milliseconds.",
     )
+    query.add_argument(
+        "--node",
+        default=_env("IICP_NODE", ""),
+        help="Node config name (for self-query neutrality). env: IICP_NODE",
+    )
 
     credits = sub.add_parser(
         "credits",
@@ -735,10 +740,17 @@ async def _cmd_query_async(args: argparse.Namespace) -> int:
         timeout_ms=args.timeout_ms,
     )
     client = IicpClient(cfg)
+    # #488: resolve source_node_id from saved node config for self-query neutrality.
+    _query_source_node_id: str | None = None
+    if getattr(args, "node", None):
+        _saved_query = load_node(args.node)
+        if _saved_query:
+            _query_source_node_id = _saved_query.node_id
     req = TaskRequest(
         intent=args.intent,
         payload=payload,
         constraints=TaskConstraints(timeout_ms=args.timeout_ms),
+        source_node_id=_query_source_node_id,
     )
     print(f"[iicp-node] Discovering nodes for {args.intent}...", file=sys.stderr)
     try:

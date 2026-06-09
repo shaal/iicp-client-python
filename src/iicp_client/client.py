@@ -194,6 +194,9 @@ class IicpClient:
             }
             if request.auth.node_token:
                 body["auth"] = {"node_token": request.auth.node_token}
+            # #488: include requester identity for self-query neutrality at the directory.
+            if request.source_node_id:
+                body["source_node_id"] = request.source_node_id
 
             # IICP-CX S.16 §5: encrypt payload when use_confidentiality=True and node advertises a key
             if self._cfg.use_confidentiality and node.cx_public_key:

@@ -201,3 +201,101 @@ def test_post_cip_receipt_posts_award():
     result_bytes = _json.dumps(result, sort_keys=True, separators=(",", ":")).encode("utf-8")
     expected_hash = hashlib.sha256(result_bytes).hexdigest()
     assert body["response_hash"] == expected_hash, "response_hash must be SHA-256 of canonical result"
+
+
+# #488 — querying_node_id forwarded in receipt body for self-query neutrality.
+def test_post_cip_receipt_forwards_querying_node_id():
+    """#488: _post_cip_receipt must include querying_node_id when provided."""
+    import asyncio
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    received: list[dict] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length).decode())
+            received.append(body)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *_args):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), Handler)
+    port = srv.server_address[1]
+    t = threading.Thread(target=srv.handle_request, daemon=True)
+    t.start()
+
+    from iicp_client.node import _post_cip_receipt
+
+    asyncio.run(
+        _post_cip_receipt(
+            directory_url=f"http://127.0.0.1:{port}",
+            token="tok",
+            hmac_key="key",
+            node_id="serving-node",
+            task_id="t-self",
+            tokens_used=10,
+            result={"content": "hi"},
+            querying_node_id="querying-node-abc",
+        )
+    )
+    t.join(timeout=2)
+
+    assert received, "directory must receive a POST"
+    assert received[0]["querying_node_id"] == "querying-node-abc", \
+        "querying_node_id must be forwarded to directory for self-query detection"
+
+
+def test_post_cip_receipt_omits_querying_node_id_when_not_provided():
+    """#488: querying_node_id absent from body when not provided (backwards compat)."""
+    import asyncio
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    received: list[dict] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length).decode())
+            received.append(body)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *_args):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), Handler)
+    port = srv.server_address[1]
+    t = threading.Thread(target=srv.handle_request, daemon=True)
+    t.start()
+
+    from iicp_client.node import _post_cip_receipt
+
+    asyncio.run(
+        _post_cip_receipt(
+            directory_url=f"http://127.0.0.1:{port}",
+            token="tok",
+            hmac_key="key",
+            node_id="serving-node",
+            task_id="t-no-qni",
+            tokens_used=10,
+            result={"content": "hi"},
+        )
+    )
+    t.join(timeout=2)
+
+    assert received, "directory must receive a POST"
+    assert "querying_node_id" not in received[0], \
+        "querying_node_id must be absent when not provided (backwards compat)"
