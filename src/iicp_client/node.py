@@ -77,9 +77,13 @@ async def _post_cip_receipt(
     nonce = _secrets.token_hex(16)
     expires_at = (datetime.now(UTC) + timedelta(seconds=300)).isoformat()
 
-    # Canonical HMAC message (TC-9c §10.3): task:tokens:parent:session:nonce:hash
-    # For direct serve (not a CIP sub-task), parent and session are empty strings.
-    canonical = f"{task_id}:{tokens_used}:::{nonce}:{response_hash}".encode()
+    # Canonical HMAC message (TC-9c §10.3): task:tokens:parent:session:nonce:hash[:qni]
+    # #490 — querying_node_id appended when present to prevent spoofing; directory ≥ v1.10.25
+    # verifies the extended canonical; older receipts omit it and use the short form.
+    canonical_str = f"{task_id}:{tokens_used}:::{nonce}:{response_hash}"
+    if querying_node_id:
+        canonical_str += f":{querying_node_id}"
+    canonical = canonical_str.encode()
     signature = hmac.new(hmac_key.encode(), canonical, hashlib.sha256).hexdigest()
 
     # amount = tokens / 1000.0; floor at 0.001 to satisfy directory min:0.0001.

@@ -249,8 +249,24 @@ def test_post_cip_receipt_forwards_querying_node_id():
     t.join(timeout=2)
 
     assert received, "directory must receive a POST"
-    assert received[0]["querying_node_id"] == "querying-node-abc", \
+    body = received[0]
+    assert body["querying_node_id"] == "querying-node-abc", \
         "querying_node_id must be forwarded to directory for self-query detection"
+
+    # #490 — verify querying_node_id is in the HMAC canonical message (prevents spoofing).
+    import hashlib
+    import hmac as hmac_mod
+
+    nonce = body["nonce"]
+    response_hash = body["response_hash"]
+    querying_node_id_val = body["querying_node_id"]
+    task_id = "t-self"
+    tokens_used = 10
+    hmac_key_490 = "key"
+    canonical_extended = f"{task_id}:{tokens_used}:::{nonce}:{response_hash}:{querying_node_id_val}".encode()
+    expected_sig = hmac_mod.new(hmac_key_490.encode(), canonical_extended, hashlib.sha256).hexdigest()
+    assert body["signature"] == expected_sig, \
+        "HMAC must include querying_node_id to prevent spoofing (#490)"
 
 
 def test_post_cip_receipt_omits_querying_node_id_when_not_provided():
