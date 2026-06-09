@@ -459,11 +459,11 @@ async def _fetch_and_display_credits(
     """Shared fetch+display logic for one node's credits summary."""
     import httpx
 
-    url = directory_url.rstrip("/") + "/v1/credits/summary"
+    url = directory_url.rstrip("/") + f"/v1/credits/summary?node_id={node_id}"
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.get(
-                url, headers={"Authorization": f"Bearer {token}", "X-Node-Id": node_id}
+                url, headers={"Authorization": f"Bearer {token}"}
             )
     except Exception as exc:  # noqa: BLE001
         sys.stderr.write(f"ERROR: request failed: {exc}\n")
