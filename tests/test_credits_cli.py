@@ -127,3 +127,77 @@ def test_verify_rejects_tampered_amount():
         assert ok == 0 and failed >= 1, "tampered amount must not verify"
     finally:
         srv.shutdown()
+
+
+# TC-9c — _post_cip_receipt constructs a valid HMAC-SHA256 receipt and POSTs it
+# to /v1/credits/award. Fails if signing is skipped or the wrong canonical message.
+def test_post_cip_receipt_posts_award():
+    """TC-9c: _post_cip_receipt must POST a signed body to /v1/credits/award."""
+    import asyncio
+    import hashlib
+    import hmac
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    received: list[dict] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length).decode())
+            received.append(body)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *_args):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), Handler)
+    port = srv.server_address[1]
+    t = threading.Thread(target=srv.handle_request, daemon=True)
+    t.start()
+
+    from iicp_client.node import _post_cip_receipt
+
+    task_id = "task-cip-py-001"
+    hmac_key = "test-hmac-key-py-abc"
+    tokens_used = 75
+    result = {"content": "hello", "usage": {"total_tokens": 75}}
+
+    asyncio.run(
+        _post_cip_receipt(
+            directory_url=f"http://127.0.0.1:{port}",
+            token="test-token",
+            hmac_key=hmac_key,
+            node_id="node-py-test",
+            task_id=task_id,
+            tokens_used=tokens_used,
+            result=result,
+        )
+    )
+    t.join(timeout=2)
+
+    assert received, "directory must receive a POST to /v1/credits/award"
+    body = received[0]
+    assert body["task_id"] == task_id
+    assert body["tokens_used"] == tokens_used
+    assert "signature" in body
+    assert "nonce" in body
+    assert "response_hash" in body
+
+    # Verify HMAC signature is well-formed (correct key + canonical message).
+    nonce = body["nonce"]
+    response_hash = body["response_hash"]
+    canonical = f"{task_id}:{tokens_used}:::{nonce}:{response_hash}".encode()
+    expected_sig = hmac.new(hmac_key.encode(), canonical, hashlib.sha256).hexdigest()
+    assert body["signature"] == expected_sig, "HMAC signature must match canonical message"
+
+    # Verify response_hash = SHA-256 of canonical JSON of result.
+    import json as _json
+    result_bytes = _json.dumps(result, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    expected_hash = hashlib.sha256(result_bytes).hexdigest()
+    assert body["response_hash"] == expected_hash, "response_hash must be SHA-256 of canonical result"

@@ -44,6 +44,65 @@ logger = logging.getLogger(__name__)
 _EMBEDDING_INTENT = "urn:iicp:intent:llm:embedding:v1"
 
 
+async def _post_cip_receipt(
+    *,
+    directory_url: str,
+    token: str,
+    hmac_key: str,
+    node_id: str,
+    task_id: str,
+    tokens_used: int,
+    result: dict[str, Any],
+) -> None:
+    """TC-9c: best-effort CIPWorkerReceipt POST to /v1/credits/award.
+
+    Server-side credit award path — the node reports task completion directly
+    so the directory credits the provider wallet without proxy forwarding.
+    Fire-and-forget: errors are suppressed so they never affect the task response.
+    """
+    import secrets as _secrets
+    from datetime import UTC, datetime, timedelta
+
+    if not hmac_key or not token:
+        return
+
+    # response_hash = SHA-256 of canonical JSON of the result.
+    result_bytes = json.dumps(result, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    response_hash = hashlib.sha256(result_bytes).hexdigest()
+
+    nonce = _secrets.token_hex(16)
+    expires_at = (datetime.now(UTC) + timedelta(seconds=300)).isoformat()
+
+    # Canonical HMAC message (TC-9c §10.3): task:tokens:parent:session:nonce:hash
+    # For direct serve (not a CIP sub-task), parent and session are empty strings.
+    canonical = f"{task_id}:{tokens_used}:::{nonce}:{response_hash}".encode()
+    signature = hmac.new(hmac_key.encode(), canonical, hashlib.sha256).hexdigest()
+
+    # amount = tokens / 1000.0; floor at 0.001 to satisfy directory min:0.0001.
+    amount = max(tokens_used, 1) / 1000.0
+
+    url = directory_url.rstrip("/") + "/v1/credits/award"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            await client.post(
+                url,
+                headers={"Authorization": f"Bearer {token}"},
+                json={
+                    "node_id": node_id,
+                    "task_id": task_id,
+                    "tokens_used": tokens_used,
+                    "amount": round(amount, 4),
+                    "nonce": nonce,
+                    "expires_at": expires_at,
+                    "signature": signature,
+                    "response_hash": response_hash,
+                    "reason": "task_completion",
+                },
+            )
+    except Exception:  # noqa: BLE001
+        pass  # best-effort: never propagate to caller
+
+
 def derive_native_endpoint(endpoint: str) -> str | None:
     """#457 / ADR-040 — derive the native binary transport_endpoint from the HTTP `endpoint`.
 
@@ -956,6 +1015,22 @@ class IicpNode:
                             }
                         ).encode()
                         self._json_response(200, resp_body)
+                        # TC-9c: fire best-effort CIPWorkerReceipt to the directory.
+                        # Server-side award path: provider reports completion so the
+                        # directory credits the wallet without proxy forwarding.
+                        if node._node_hmac_key and node._node_token:
+                            asyncio.run_coroutine_threadsafe(
+                                _post_cip_receipt(
+                                    directory_url=node._cfg.directory_url,
+                                    token=node._node_token,
+                                    hmac_key=node._node_hmac_key,
+                                    node_id=node._cfg.node_id,
+                                    task_id=task_id,
+                                    tokens_used=tokens,
+                                    result=result,
+                                ),
+                                loop,
+                            )
                     except RuntimeError as exc:
                         if "shutdown" in str(exc).lower() or "closed" in str(exc).lower():
                             logger.debug("Handler skipped during node shutdown: %s", exc)
