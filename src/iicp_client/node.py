@@ -882,6 +882,10 @@ class IicpNode:
                     else {"active": False}
                 )
                 eff_max = node._availability.effective_max_concurrent(node._cfg.max_concurrent)
+                all_models: list[str] = [node._cfg.model] if node._cfg.model else []
+                for cap in node._cfg.capabilities:
+                    if cap not in all_models:
+                        all_models.append(cap)
                 body = json.dumps(
                     {
                         "status": "ok",
@@ -893,6 +897,7 @@ class IicpNode:
                         "effective_max_concurrent": eff_max,
                         "available": active < eff_max,
                         "model": node._cfg.model or "",
+                        "models": all_models,
                         "intent": node._cfg.intent,
                         "pinhole_state": pinhole_state,
                     }

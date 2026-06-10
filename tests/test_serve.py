@@ -178,6 +178,31 @@ class TestHealth:
         _, body = srv.get("/iicp/health")
         assert body["max_concurrent"] == 2
 
+    def test_health_models_array_contains_primary_model(self, srv: _ServerHandle):
+        """#494: /iicp/health models[] must include the primary model; DIR-TRUST-01 uses this."""
+        _, body = srv.get("/iicp/health")
+        assert "models" in body, "/iicp/health must include models[] array"
+        assert isinstance(body["models"], list), "models must be a list"
+        assert "test-model" in body["models"], "primary model must appear in models[]"
+
+    def test_health_models_includes_capabilities(self):
+        """#494: capabilities are folded into models[] on the health endpoint."""
+        cfg = NodeConfig(
+            node_id="multi-node",
+            endpoint="http://multi.local",
+            intent="urn:iicp:intent:llm:chat:v1",
+            model="primary-model",
+            capabilities=["extra-model"],
+        )
+        h = _ServerHandle(cfg).start()
+        try:
+            _, body = h.get("/iicp/health")
+            assert "models" in body
+            assert "primary-model" in body["models"]
+            assert "extra-model" in body["models"]
+        finally:
+            h.stop()
+
     def test_unknown_get_path_404(self, srv: _ServerHandle):
         status, _ = srv.get("/not-a-thing")
         assert status == 404
