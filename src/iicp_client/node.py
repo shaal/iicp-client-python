@@ -239,6 +239,12 @@ class NodeConfig:
     # Detected backend server flavor advertised at register (node-detail field):
     # ollama / lmstudio / vllm / llamacpp / anthropic / custom.
     backend: str | None = None
+    # #494 — backend base URL for live model health probing during heartbeat.
+    # When set, the heartbeat includes health_models=<current runtime model list>
+    # so the directory can filter stale-model nodes from discover results.
+    # Empty = no probing (backward compat; health_models field omitted from heartbeat).
+    backend_url: str = ""
+    backend_api_key: str = ""
     region: str | None = None
     capabilities: list[str] = field(default_factory=list)
     directory_url: str = "https://iicp.network/api"
@@ -653,6 +659,12 @@ class IicpNode:
         }
         if ok > 0 or fail > 0:
             payload["metrics"] = {"tasks_success": ok, "tasks_failed": fail}
+        # #494 — report live model list from backend so directory can filter stale-model
+        # nodes from discover. Best-effort: if probe fails, omit health_models (backward compat).
+        if self._cfg.backend_url:
+            health_models = await self._probe_health_models()
+            if health_models is not None:
+                payload["health_models"] = health_models
         # ADR-047 Part A (#411) — answer the directory's liveness challenge from the
         # previous beat by HMAC-ing the nonce with node_hmac_key. Proves we control
         # the key (anti-replay) without any dial-back. No-op until we have both a
@@ -672,6 +684,37 @@ class IicpNode:
             self._liveness_challenge = resp.json().get("challenge") or self._liveness_challenge
         except Exception:  # noqa: BLE001
             pass
+
+    async def _probe_health_models(self) -> list[str] | None:
+        """Best-effort: return the backend's current model list for health_models reporting.
+
+        Tries Ollama /api/tags then OpenAI /v1/models. Returns None on any error
+        so the caller can silently omit health_models from the heartbeat payload
+        (backward compat with directories that don't support the field yet).
+        """
+        base = self._cfg.backend_url.rstrip("/")
+        root = base[:-3] if base.endswith("/v1") else base
+        headers = {}
+        if self._cfg.backend_api_key:
+            headers["Authorization"] = f"Bearer {self._cfg.backend_api_key}"
+        # Ollama /api/tags → {"models":[{"name":"..."},...]}
+        try:
+            resp = await self._http.get(f"{root}/api/tags", headers=headers, timeout=2.0)
+            if resp.is_success:
+                data = resp.json()
+                names = sorted({m["name"] for m in data.get("models", []) if m.get("name")})
+                return names
+        except Exception:  # noqa: BLE001
+            pass
+        # OpenAI-compat /v1/models → {"data":[{"id":"..."},...]}
+        try:
+            resp = await self._http.get(f"{root}/v1/models", headers=headers, timeout=2.0)
+            if resp.is_success:
+                data = resp.json()
+                return [m["id"] for m in data.get("data", []) if m.get("id")]
+        except Exception:  # noqa: BLE001
+            pass
+        return None
 
     async def _heartbeat_loop(self, node_token: str) -> None:
         token = node_token

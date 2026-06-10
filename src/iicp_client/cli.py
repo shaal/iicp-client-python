@@ -1027,6 +1027,10 @@ async def _serve(args: argparse.Namespace) -> int:
             cfg.capabilities = extra
             logger.info("GAP-6: advertising %d additional models: %s", len(extra), extra[:6])
 
+    # #494 — wire backend_url into NodeConfig so heartbeat can probe live model list.
+    cfg.backend_url = args.backend_url or ""
+    cfg.backend_api_key = getattr(args, "backend_api_key", "") or ""
+
     # NAT-4 guard: if endpoint is non-routable and no relay configured, skip
     # registration to avoid a confusing 422 from the directory's RoutableEndpoint check.
     _ep = public_endpoint.lower()

@@ -534,3 +534,107 @@ def test_heartbeat_self_heals_from_empty_initial_token(monkeypatch):
     asyncio.run(_run())
     assert calls["reg"] >= 1, "empty-token loop must re-register on the 401"
     assert calls["last_token"] == "recovered-token", "loop must resume with the recovered token"
+
+
+# ── #494 — health_models heartbeat reporting ─────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_heartbeat_includes_health_models_when_probe_succeeds(monkeypatch):
+    """#494: when backend_url is set and probe returns models, heartbeat payload
+    includes health_models. Fails if _probe_health_models result is not forwarded."""
+    import httpx
+    from unittest.mock import AsyncMock
+
+    received: list[dict] = []
+
+    async def fake_probe(self):  # noqa: ANN001
+        return ["llama3:latest", "qwen2.5:0.5b"]
+
+    async def fake_post(url, **kwargs):  # noqa: ANN001
+        req_obj = httpx.Request("POST", url)
+        body = kwargs.get("json", {})
+        received.append(body)
+        return httpx.Response(200, json={"ok": True}, request=req_obj)
+
+    cfg = NodeConfig(
+        node_id="hm-test-1",
+        endpoint="http://127.0.0.1:9999",
+        intent="urn:iicp:intent:llm:chat:v1",
+        directory_url="http://localhost:8888",
+        backend_url="http://localhost:11434",
+    )
+    n = IicpNode(cfg)
+    probe_mock = AsyncMock(return_value=["llama3:latest", "qwen2.5:0.5b"])
+    monkeypatch.setattr(n, "_probe_health_models", probe_mock)
+    # Patch the HTTP client's post to capture the payload
+    post_mock = AsyncMock(side_effect=fake_post)
+    monkeypatch.setattr(n._http, "post", post_mock)
+
+    await n.heartbeat("tok")
+    assert received, "heartbeat should have fired"
+    assert received[0].get("health_models") == ["llama3:latest", "qwen2.5:0.5b"], \
+        "health_models must appear in heartbeat payload when probe succeeds"
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_includes_empty_health_models_when_backend_returns_empty(monkeypatch):
+    """#494: when probe returns an empty list, health_models=[] is sent (not omitted)
+    — directory interprets [] as 'no models currently live'."""
+    import httpx
+    from unittest.mock import AsyncMock
+
+    received: list[dict] = []
+
+    async def fake_post(url, **kwargs):  # noqa: ANN001
+        req_obj = httpx.Request("POST", url)
+        received.append(kwargs.get("json", {}))
+        return httpx.Response(200, json={"ok": True}, request=req_obj)
+
+    cfg = NodeConfig(
+        node_id="hm-test-2",
+        endpoint="http://127.0.0.1:9999",
+        intent="urn:iicp:intent:llm:chat:v1",
+        directory_url="http://localhost:8888",
+        backend_url="http://localhost:11434",
+    )
+    n = IicpNode(cfg)
+    probe_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(n, "_probe_health_models", probe_mock)
+    post_mock = AsyncMock(side_effect=fake_post)
+    monkeypatch.setattr(n._http, "post", post_mock)
+
+    await n.heartbeat("tok")
+    assert received, "heartbeat should have fired"
+    assert received[0].get("health_models") == [], \
+        "empty models list must be sent as [] not omitted"
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_omits_health_models_when_no_backend_url(monkeypatch):
+    """#494: when backend_url is not set, health_models must NOT appear in the
+    heartbeat payload (backward compat — old nodes without backend_url)."""
+    import httpx
+    from unittest.mock import AsyncMock
+
+    received: list[dict] = []
+
+    async def fake_post(url, **kwargs):  # noqa: ANN001
+        req_obj = httpx.Request("POST", url)
+        received.append(kwargs.get("json", {}))
+        return httpx.Response(200, json={"ok": True}, request=req_obj)
+
+    cfg = NodeConfig(
+        node_id="hm-test-3",
+        endpoint="http://127.0.0.1:9999",
+        intent="urn:iicp:intent:llm:chat:v1",
+        directory_url="http://localhost:8888",
+        # No backend_url
+    )
+    n = IicpNode(cfg)
+    post_mock = AsyncMock(side_effect=fake_post)
+    monkeypatch.setattr(n._http, "post", post_mock)
+
+    await n.heartbeat("tok")
+    assert received, "heartbeat should have fired"
+    assert "health_models" not in received[0], \
+        "health_models must be absent when no backend_url is configured"
