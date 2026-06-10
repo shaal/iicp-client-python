@@ -44,6 +44,7 @@ from iicp_client.identity import (
     list_nodes,
     load_node,
     load_operator,
+    no_identity_notice,
     save_node,
     save_operator,
 )
@@ -895,7 +896,12 @@ async def _serve(args: argparse.Namespace) -> int:
     _op_display_name = None
     _op_created_at = None
     _op_integrity_hash = None
-    if _op is not None and _op.is_key_backed():
+    _identity_notice = no_identity_notice(_op)
+    if _identity_notice is not None:
+        # #503 — anonymous registration accrues no founder/recognition standing;
+        # say so loudly instead of silently excluding the operator. Non-fatal.
+        sys.stderr.write(_identity_notice + "\n")
+    else:
         from iicp_client.delegation import issue_delegation
 
         _op_delegation = issue_delegation(_op.signing_key(), node_id)

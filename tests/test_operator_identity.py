@@ -62,3 +62,40 @@ def test_legacy_uuid_identity_is_not_key_backed():
         raise AssertionError("legacy keyless identity must refuse to sign")
     except ValueError:
         pass
+
+
+# ── #503 — anonymous-registration notice ─────────────────────────────────────
+# A node serving without a key-backed operator identity accrues NO founder or
+# recognition standing; the SDK must say so loudly instead of staying silent
+# (the first external mesh operator was invisible to the founders program for
+# 3 days because nothing told him to run `iicp-node init`). Each test fails if
+# the notice helper is removed or stops covering its case.
+
+
+def test_no_identity_notice_fires_when_no_operator():
+    from iicp_client.identity import NO_IDENTITY_NOTICE, no_identity_notice
+
+    notice = no_identity_notice(None)
+    assert notice == NO_IDENTITY_NOTICE
+    assert "iicp-node init" in notice
+    assert "founder" in notice.lower()
+
+
+def test_no_identity_notice_fires_for_legacy_keyless_identity():
+    from iicp_client.identity import no_identity_notice
+
+    legacy = OperatorIdentity(
+        operator_id="op-12345678-1234-1234-1234-123456789abc",
+        display_name="Legacy",
+        contact="",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    assert not legacy.is_key_backed()
+    assert no_identity_notice(legacy) is not None
+
+
+def test_no_identity_notice_silent_for_key_backed_identity():
+    from iicp_client.identity import no_identity_notice
+
+    op = OperatorIdentity.generate(display_name="Keyed")
+    assert no_identity_notice(op) is None
