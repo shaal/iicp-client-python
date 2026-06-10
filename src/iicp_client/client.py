@@ -8,8 +8,11 @@ import logging
 import os
 import random
 import re
+import time
 import uuid
 from typing import Any
+
+import httpx
 from urllib.parse import urlparse
 
 from iicp_client._http import _traceparent, get_json, post_json
@@ -77,6 +80,44 @@ class IicpClient:
                 self._cfg.routing_epsilon = max(0.0, min(1.0, float(_env_eps)))
             except ValueError:
                 pass
+        # Phase 2 (#496): consumer token cache — (target_node_id, intent) → (token, exp_unix)
+        self._ct_cache: dict[tuple[str, str], tuple[str, int]] = {}
+
+    # ------------------------------------------------------------------
+    # Phase 2 consumer token acquisition (#496)
+    # ------------------------------------------------------------------
+
+    async def _acquire_consumer_token(
+        self, target_node_id: str, intent: str, timeout_s: float = 5.0
+    ) -> str | None:
+        node_token = self._cfg.node_token
+        if not node_token:
+            return None
+        cache_key = (target_node_id, intent)
+        cached = self._ct_cache.get(cache_key)
+        if cached:
+            tok, exp = cached
+            if time.time() + 30 < exp:
+                return tok
+        base = self._cfg.directory_url.rstrip("/api").rstrip("/")
+        url = f"{base}/api/v1/consumer-token"
+        try:
+            async with httpx.AsyncClient(timeout=timeout_s) as client:
+                r = await client.post(
+                    url,
+                    json={"target_node_id": target_node_id, "intent": intent},
+                    headers={"Authorization": f"Bearer {node_token}"},
+                )
+                if r.status_code == 201:
+                    data = r.json()
+                    token: str = data.get("token", "")
+                    exp_unix: int = int(data.get("expires_at", 0))
+                    if token:
+                        self._ct_cache[cache_key] = (token, exp_unix)
+                        return token
+        except Exception:
+            pass
+        return None
 
     # ------------------------------------------------------------------
     # Public async API
@@ -205,6 +246,12 @@ class IicpClient:
             else:
                 body["payload"] = request.payload
 
+            # Phase 2 (#496): acquire consumer token if configured
+            node_headers: dict[str, str] = {}
+            ct = await self._acquire_consumer_token(node.node_id, request.intent)
+            if ct:
+                node_headers["X-IICP-Consumer-Token"] = ct
+
             node_connected = True
             for attempt in range(self._cfg.max_retries):
                 try:
@@ -215,6 +262,7 @@ class IicpClient:
                         component="adapter",
                         tls_verify=self._cfg.tls_verify,
                         traceparent=tp,
+                        extra_headers=node_headers or None,
                     )
                     return TaskResponse(
                         task_id=raw.get("task_id", task_id),

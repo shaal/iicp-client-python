@@ -74,10 +74,13 @@ async def post_json(
     component: str = "adapter",
     tls_verify: bool = True,
     traceparent: str | None = None,
+    extra_headers: dict[str, str] | None = None,
 ) -> tuple[dict[str, Any], int]:
     """Returns (response_body, elapsed_ms)."""
     timeout = (timeout_ms / 1000.0) + 2.0
-    headers = {"traceparent": traceparent or _traceparent()}
+    headers: dict[str, str] = {"traceparent": traceparent or _traceparent()}
+    if extra_headers:
+        headers.update(extra_headers)
     t0 = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=timeout, verify=_tls_context(tls_verify)) as client:
