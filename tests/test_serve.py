@@ -542,8 +542,9 @@ def test_heartbeat_self_heals_from_empty_initial_token(monkeypatch):
 async def test_heartbeat_includes_health_models_when_probe_succeeds(monkeypatch):
     """#494: when backend_url is set and probe returns models, heartbeat payload
     includes health_models. Fails if _probe_health_models result is not forwarded."""
-    import httpx
     from unittest.mock import AsyncMock
+
+    import httpx
 
     received: list[dict] = []
 
@@ -580,8 +581,9 @@ async def test_heartbeat_includes_health_models_when_probe_succeeds(monkeypatch)
 async def test_heartbeat_includes_empty_health_models_when_backend_returns_empty(monkeypatch):
     """#494: when probe returns an empty list, health_models=[] is sent (not omitted)
     — directory interprets [] as 'no models currently live'."""
-    import httpx
     from unittest.mock import AsyncMock
+
+    import httpx
 
     received: list[dict] = []
 
@@ -613,8 +615,9 @@ async def test_heartbeat_includes_empty_health_models_when_backend_returns_empty
 async def test_heartbeat_omits_health_models_when_no_backend_url(monkeypatch):
     """#494: when backend_url is not set, health_models must NOT appear in the
     heartbeat payload (backward compat — old nodes without backend_url)."""
-    import httpx
     from unittest.mock import AsyncMock
+
+    import httpx
 
     received: list[dict] = []
 
