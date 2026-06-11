@@ -360,6 +360,53 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Optional proxy.toml path (env IICP_PROXY_* override individual fields).",
     )
 
+    # ── mcp-gateway — bridge a local MCP server as an IICP provider node ──────────
+    gw = sub.add_parser(
+        "mcp-gateway",
+        help="Bridge a local MCP server into the IICP mesh as a registered provider node.",
+    )
+    gw.add_argument(
+        "--mcp-url",
+        default=_env("IICP_MCP_URL", "http://localhost:8001") or "http://localhost:8001",
+        help="Local MCP server base URL (env IICP_MCP_URL, default http://localhost:8001).",
+    )
+    gw.add_argument(
+        "--tools",
+        default=_env("IICP_MCP_TOOLS", "") or "",
+        help="Comma-separated MCP tool names to advertise (env IICP_MCP_TOOLS). Required.",
+    )
+    gw.add_argument(
+        "--node-id",
+        default=_env("IICP_NODE_ID", "") or "",
+        help="Node ID (env IICP_NODE_ID, auto-generated if absent).",
+    )
+    gw.add_argument(
+        "--public-endpoint",
+        default=_env("IICP_PUBLIC_ENDPOINT", "") or "",
+        help="Externally reachable URL for this gateway (env IICP_PUBLIC_ENDPOINT).",
+    )
+    gw.add_argument(
+        "--directory-url",
+        default=_env("IICP_DIRECTORY_URL", "https://iicp.network/api/v1") or "https://iicp.network/api/v1",
+        help="IICP directory URL (env IICP_DIRECTORY_URL).",
+    )
+    gw.add_argument(
+        "--region",
+        default=_env("IICP_REGION", "local") or "local",
+        help="Region tag (env IICP_REGION, default local).",
+    )
+    gw.add_argument(
+        "--port",
+        type=int,
+        default=int(_env("IICP_PORT", "9484") or "9484"),
+        help="Listen port (env IICP_PORT, default 9484).",
+    )
+    gw.add_argument(
+        "--host",
+        default=_env("IICP_HOST", "::") or "::",
+        help="Bind host (env IICP_HOST, default :: — dual-stack).",
+    )
+
     return p
 
 
@@ -1578,6 +1625,182 @@ def _cmd_proxy(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_mcp_gateway(args: argparse.Namespace) -> int:
+    """``iicp-node mcp-gateway`` — bridge a local MCP server as an IICP provider node.
+
+    Wraps each tool as ``urn:iicp:intent:mcp:<tool>:v1``, registers with the
+    directory, runs a heartbeat loop, and serves ``POST /v1/task`` by forwarding
+    to the MCP server's ``tools/call`` JSON-RPC endpoint.
+    """
+    import re
+    import threading
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    import httpx
+
+    _DANGEROUS = {"bash", "shell", "exec", "run_command", "eval"}
+
+    def _tool_to_intent(name: str) -> str:
+        safe = re.sub(r"[^a-z0-9_]", "_", name.lower())
+        return f"urn:iicp:intent:mcp:{safe}:v1"
+
+    raw_tools = [t.strip() for t in (args.tools or "").split(",") if t.strip()]
+    active_tools = [t for t in raw_tools if t.lower() not in _DANGEROUS]
+    if not active_tools:
+        sys.stderr.write(
+            "ERROR: --tools is required. Provide a comma-separated list of MCP tool names.\n"
+            "  Example: iicp-node mcp-gateway --tools read_file,list_dir --mcp-url http://localhost:8001\n"
+        )
+        return 2
+
+    node_id = args.node_id or f"gateway-mcp-{uuid.uuid4().hex[:8]}"
+    directory_url = (args.directory_url or "https://iicp.network/api/v1").rstrip("/")
+    mcp_url = (args.mcp_url or "http://localhost:8001").rstrip("/")
+    region = args.region or "local"
+    port = args.port or 9484
+    host = args.host or "::"
+    public_endpoint = args.public_endpoint or f"http://localhost:{port}"
+    node_token_env = _env("IICP_NODE_TOKEN", "") or ""
+
+    intents = [_tool_to_intent(t) for t in active_tools]
+    _live: dict = {"token": node_token_env, "mcp_rpc_id": 0}
+
+    def _register() -> str:
+        payload = {
+            "node_id": node_id,
+            "region": region,
+            "endpoint": public_endpoint,
+            "intents": intents,
+            "mcp_tools": active_tools,
+            "protocol_version": "1.0",
+        }
+        headers = {"Authorization": f"Bearer {_live['token']}"} if _live["token"] else {}
+        r = httpx.post(f"{directory_url}/register", json=payload, headers=headers, timeout=10.0)
+        r.raise_for_status()
+        return r.json().get("node_token", _live["token"])
+
+    def _heartbeat() -> None:
+        payload = {"node_id": node_id, "intents": intents, "load": 0.0, "status": "active"}
+        try:
+            httpx.post(
+                f"{directory_url}/heartbeat",
+                json=payload,
+                headers={"Authorization": f"Bearer {_live['token']}"},
+                timeout=10.0,
+            ).raise_for_status()
+        except httpx.HTTPError:
+            pass
+
+    def _call_mcp(tool_name: str, arguments: dict) -> object:
+        _live["mcp_rpc_id"] += 1
+        rpc = {
+            "jsonrpc": "2.0",
+            "id": _live["mcp_rpc_id"],
+            "method": "tools/call",
+            "params": {"name": tool_name, "arguments": arguments},
+        }
+        r = httpx.post(f"{mcp_url}/mcp", json=rpc, timeout=30.0)
+        r.raise_for_status()
+        data = r.json()
+        if "error" in data:
+            raise ValueError(data["error"].get("message", "MCP error"))
+        return data.get("result")
+
+    class _Handler(BaseHTTPRequestHandler):
+        def log_message(self, fmt, *a):  # suppress access log
+            pass
+
+        def _send_json(self, code: int, body: dict) -> None:
+            raw = json.dumps(body).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def do_GET(self):
+            if self.path == "/iicp/health":
+                self._send_json(200, {
+                    "status": "ok",
+                    "node_id": node_id,
+                    "active_tools": active_tools,
+                    "mcp_server": mcp_url,
+                    "timestamp": int(time.time()),
+                })
+            else:
+                self._send_json(404, {"error": "not found"})
+
+        def do_POST(self):
+            if self.path != "/v1/task":
+                self._send_json(404, {"error": "not found"})
+                return
+            auth = self.headers.get("Authorization", "")
+            if not auth or auth != f"Bearer {_live['token']}":
+                self._send_json(401, {"error": "Unauthorized"})
+                return
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length))
+            payload = body.get("payload", {})
+            tool_name: str = payload.get("tool_name", "")
+            if not tool_name:
+                m = re.search(r"urn:iicp:intent:mcp:([^:]+):v1", body.get("intent", ""))
+                if m:
+                    tool_name = m.group(1)
+            if not tool_name:
+                self._send_json(400, {"error": "Cannot determine tool name from payload or intent"})
+                return
+            if tool_name.lower() in _DANGEROUS:
+                self._send_json(403, {"error": "Tool not permitted"})
+                return
+            if active_tools and tool_name not in active_tools:
+                self._send_json(404, {"error": "Tool not available on this gateway"})
+                return
+            task_id = body.get("task_id", str(uuid.uuid4()))
+            try:
+                result = _call_mcp(tool_name, payload.get("arguments", {}))
+            except httpx.HTTPError:
+                self._send_json(502, {"error": "MCP server unreachable"})
+                return
+            except ValueError as exc:
+                self._send_json(422, {"error": str(exc)})
+                return
+            self._send_json(200, {"task_id": task_id, "status": "completed", "result": result})
+
+    # Register + start
+    try:
+        _live["token"] = _register()
+        sys.stdout.write(
+            f"iicp-node mcp-gateway registered as {node_id!r} with {len(active_tools)} tool(s): "
+            f"{', '.join(active_tools)}\n"
+            f"  IICP endpoint: {public_endpoint}\n"
+            f"  MCP server:    {mcp_url}\n"
+        )
+    except httpx.HTTPError as exc:
+        sys.stderr.write(f"WARNING: directory registration failed ({exc}) — running without listing\n")
+
+    stop_event = threading.Event()
+
+    def _heartbeat_loop():
+        while not stop_event.wait(30):
+            _heartbeat()
+
+    hb_thread = threading.Thread(target=_heartbeat_loop, daemon=True)
+    hb_thread.start()
+
+    bind_host = "::" if host in ("", "::") else host
+    server = ThreadingHTTPServer((bind_host, port), _Handler)
+    sys.stdout.write(f"  Listening on {bind_host}:{port}\n")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop_event.set()
+        server.server_close()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     raw_argv = sys.argv[1:] if argv is None else argv
@@ -1598,6 +1821,8 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(_serve(args))
     if args.cmd == "proxy":
         return _cmd_proxy(args)
+    if args.cmd == "mcp-gateway":
+        return _cmd_mcp_gateway(args)
     if args.cmd == "init":
         return _cmd_init(args)
     if args.cmd == "list":
