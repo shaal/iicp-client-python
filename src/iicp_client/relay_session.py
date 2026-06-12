@@ -32,6 +32,7 @@ import asyncio
 import logging
 import struct
 import threading
+import time
 import uuid
 from typing import Any
 
@@ -123,14 +124,88 @@ class RelayWorkerSession:
             fut.set_result(result)
 
 
+class HttpPollWorkerSession:
+    """One bound HTTP long-poll relay-worker session (#450 browser workers).
+
+    Duck-type compatible with RelayWorkerSession (forward_task / is_alive /
+    on_response) so RelaySessionRegistry and the relay handlers treat both
+    transports identically. Instead of pushing CALL frames down a TCP writer,
+    ``forward_task()`` puts the call on an asyncio queue that the worker
+    drains via ``GET /v1/relay/pull``; the worker posts the result back via
+    ``POST /v1/relay/result``, which resolves the pending future.
+
+    Auth: ``session_token`` is issued at bind and must be presented as a
+    Bearer token on pull/result/unbind — stronger than the unauthenticated
+    TCP RELAY_BIND (#510), applied to the new transport from day one.
+
+    Liveness = the worker pulled within ``liveness_window`` seconds. A dead
+    session is displaceable by a fresh bind (same #510 interim-C semantics
+    as the TCP transport: an *alive* session is never displaced).
+    """
+
+    def __init__(
+        self,
+        worker_id: str,
+        intent: str = "",
+        models: list[str] | None = None,
+        liveness_window: float = 90.0,
+    ) -> None:
+        self.worker_id = worker_id
+        self.intent = intent
+        self.models = models or []
+        self.session_token = uuid.uuid4().hex
+        self._queue: asyncio.Queue[dict] = asyncio.Queue()
+        self._pending: dict[str, asyncio.Future[dict]] = {}
+        self._last_pull = time.monotonic()
+        self._liveness_window = liveness_window
+        self._closed = False
+
+    async def forward_task(self, task: dict, timeout: float = 120.0) -> dict:
+        """Queue a CALL for the polling worker and await its RESPONSE."""
+        call_id = str(uuid.uuid4())
+        loop = asyncio.get_event_loop()
+        fut: asyncio.Future[dict] = loop.create_future()
+        self._pending[call_id] = fut
+        await self._queue.put({"call_id": call_id, "task": task})
+        try:
+            return await asyncio.wait_for(fut, timeout=timeout)
+        finally:
+            self._pending.pop(call_id, None)
+
+    async def next_call(self, timeout: float = 25.0) -> dict | None:
+        """Long-poll: next queued CALL, or None when the window elapses."""
+        self._last_pull = time.monotonic()
+        try:
+            return await asyncio.wait_for(self._queue.get(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            self._last_pull = time.monotonic()
+
+    def is_alive(self) -> bool:
+        return (not self._closed) and (time.monotonic() - self._last_pull) < self._liveness_window
+
+    def on_response(self, call_id: str, result: dict) -> None:
+        """Resolve the pending consumer future. Must run on the loop thread."""
+        fut = self._pending.get(call_id)
+        if fut is not None and not fut.done():
+            fut.set_result(result)
+
+    def close(self) -> None:
+        self._closed = True
+
+
+RelaySession = RelayWorkerSession | HttpPollWorkerSession
+
+
 class RelaySessionRegistry:
-    """Thread-safe mapping worker_id → RelayWorkerSession."""
+    """Thread-safe mapping worker_id → relay session (TCP or HTTP-poll)."""
 
     def __init__(self) -> None:
-        self._sessions: dict[str, RelayWorkerSession] = {}
+        self._sessions: dict[str, RelaySession] = {}
         self._lock = threading.Lock()
 
-    def bind(self, worker_id: str, session: RelayWorkerSession) -> None:
+    def bind(self, worker_id: str, session: RelaySession) -> None:
         with self._lock:
             self._sessions[worker_id] = session
 
@@ -138,9 +213,19 @@ class RelaySessionRegistry:
         with self._lock:
             self._sessions.pop(worker_id, None)
 
-    def get(self, worker_id: str) -> RelayWorkerSession | None:
+    def get(self, worker_id: str) -> RelaySession | None:
         with self._lock:
             return self._sessions.get(worker_id)
+
+    def get_by_token(self, token: str) -> HttpPollWorkerSession | None:
+        """Find an HTTP-poll session by its bearer token (pull/result auth)."""
+        if not token:
+            return None
+        with self._lock:
+            for sess in self._sessions.values():
+                if isinstance(sess, HttpPollWorkerSession) and sess.session_token == token:
+                    return sess
+        return None
 
     def is_bound(self, worker_id: str) -> bool:
         with self._lock:
@@ -166,10 +251,14 @@ class RelayAcceptServer:
         *,
         host: str = "0.0.0.0",
         port: int = 9485,
+        http_port: int = 9484,
     ) -> None:
         self.registry = registry
         self.host = host
         self.port = port
+        # The relay's public HTTP task port — advertised in RELAY_ACK (field 4)
+        # so workers can register the correct {relay}/v1/relay-for/<wid> endpoint.
+        self.http_port = http_port
         self._server: asyncio.AbstractServer | None = None
 
     async def start(self) -> None:
@@ -284,7 +373,10 @@ class RelayAcceptServer:
         self.registry.bind(worker_id, session)
         logger.info("Relay: worker=%s bound (intent=%s models=%s)", worker_id, intent, models)
 
-        writer.write(_make_frame(_MT_RELAY_ACK, _enc({1: "ok", 2: worker_id})))
+        # Field 4 (additive): the relay's HTTP task port, so the worker can
+        # register {relay_host}:{http_port}/v1/relay-for/{worker_id} with the
+        # directory. Old workers ignore unknown CBOR keys.
+        writer.write(_make_frame(_MT_RELAY_ACK, _enc({1: "ok", 2: worker_id, 4: self.http_port})))
         await writer.drain()
 
         # ── Step 3: relay-worker loop ─────────────────────────────────────────

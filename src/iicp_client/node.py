@@ -826,6 +826,14 @@ class IicpNode:
                     self._health()
                 elif self.path == "/metrics":
                     self._prometheus()
+                elif self.path == "/v1/relay/pull" and node._cfg.relay_capable:
+                    self._relay_pull()
+                elif (
+                    self.path.startswith("/v1/relay-for/")
+                    and self.path.endswith("/iicp/health")
+                    and node._cfg.relay_capable
+                ):
+                    self._relay_for_health()
                 else:
                     self.send_error(404)
 
@@ -836,8 +844,39 @@ class IicpNode:
                     self._peers()
                 elif self.path == "/v1/relay" and node._cfg.relay_capable:
                     self._relay()
+                elif self.path == "/v1/relay/bind" and node._cfg.relay_capable:
+                    self._relay_bind()
+                elif self.path == "/v1/relay/result" and node._cfg.relay_capable:
+                    self._relay_result()
+                elif self.path == "/v1/relay/unbind" and node._cfg.relay_capable:
+                    self._relay_unbind()
+                elif (
+                    self.path.startswith("/v1/relay-for/")
+                    and self.path.endswith("/v1/task")
+                    and node._cfg.relay_capable
+                ):
+                    self._relay_for_task()
                 else:
                     self.send_error(404)
+
+            def do_OPTIONS(self) -> None:  # noqa: N802
+                # CORS preflight for browser relay workers (#450/#452): the
+                # /v1/relay/* worker transport and /v1/relay-for/* consumer
+                # paths are fetch()-able from web pages.
+                if node._cfg.relay_capable and (
+                    self.path.startswith("/v1/relay/") or self.path.startswith("/v1/relay-for/")
+                ):
+                    self.send_response(204)
+                    self._send_cors_headers()
+                    self.send_header("Access-Control-Max-Age", "86400")
+                    self.end_headers()
+                else:
+                    self.send_error(404)
+
+            def _send_cors_headers(self) -> None:
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+                self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
             # ── POST /v1/peers (ADR-009 gossip exchange) ──────────────────
 
@@ -906,6 +945,174 @@ class IicpNode:
                 except Exception as exc:  # noqa: BLE001
                     err = json.dumps({"error": {"code": "IICP-E031", "message": f"relay failed: {exc}"}}).encode()
                     self._json_response(502, err)
+
+            # ── HTTP long-poll relay worker transport (#450) ──────────────
+            # Browser-compatible worker side: bind → pull (long-poll) →
+            # result. Same RelaySessionRegistry as TCP RELAY_BIND workers;
+            # consumers reach both via the path-scoped /v1/relay-for/<wid>/
+            # endpoints below. All responses carry CORS headers (web pages
+            # are first-class callers of this transport).
+
+            def _relay_authed_session(self) -> Any:
+                """Resolve the Bearer token to a live HTTP-poll session, or None."""
+                auth = self.headers.get("Authorization", "")
+                token = auth[7:] if auth.startswith("Bearer ") else ""
+                return node._relay_sessions.get_by_token(token)
+
+            def _relay_bind(self) -> None:
+                length = int(self.headers.get("Content-Length", 0))
+                try:
+                    payload = json.loads(self.rfile.read(length)) if length else {}
+                except (ValueError, json.JSONDecodeError):
+                    self.send_error(400, "invalid JSON body")
+                    return
+                worker_id = payload.get("worker_id", "")
+                if not worker_id or not isinstance(worker_id, str):
+                    err = json.dumps({"error": {"code": "IICP-E001", "message": "worker_id is required"}}).encode()
+                    self._json_response(422, err, cors=True)
+                    return
+                # #510 interim-C parity: never displace an ALIVE bound session.
+                existing = node._relay_sessions.get(worker_id)
+                if existing is not None and existing.is_alive():
+                    err = json.dumps(
+                        {"error": {"code": "IICP-E038", "message": "worker_id has an alive relay session — rebind rejected"}}
+                    ).encode()
+                    self._json_response(409, err, cors=True)
+                    return
+                from iicp_client.relay_session import HttpPollWorkerSession
+
+                models = payload.get("models") if isinstance(payload.get("models"), list) else []
+                session = HttpPollWorkerSession(
+                    worker_id=worker_id,
+                    intent=str(payload.get("intent", "")),
+                    models=[str(m) for m in models],
+                )
+                node._relay_sessions.bind(worker_id, session)
+                logger.info("HTTP-poll relay worker bound: %s (models=%s)", worker_id, session.models)
+                body = json.dumps(
+                    {
+                        "session_token": session.session_token,
+                        "poll_timeout_s": 25,
+                        "worker_endpoint_path": f"/v1/relay-for/{worker_id}",
+                    }
+                ).encode()
+                self._json_response(200, body, cors=True)
+
+            def _relay_pull(self) -> None:
+                session = self._relay_authed_session()
+                if session is None:
+                    err = json.dumps({"error": {"code": "IICP-E021", "message": "invalid or missing relay session token"}}).encode()
+                    self._json_response(401, err, cors=True)
+                    return
+                try:
+                    call = asyncio.run_coroutine_threadsafe(
+                        session.next_call(timeout=25.0), loop
+                    ).result(timeout=30)
+                except Exception as exc:  # noqa: BLE001
+                    err = json.dumps({"error": {"code": "IICP-E031", "message": f"pull failed: {exc}"}}).encode()
+                    self._json_response(502, err, cors=True)
+                    return
+                if call is None:
+                    self.send_response(204)
+                    self._send_cors_headers()
+                    self.end_headers()
+                    return
+                self._json_response(200, json.dumps(call).encode(), cors=True)
+
+            def _relay_result(self) -> None:
+                session = self._relay_authed_session()
+                if session is None:
+                    err = json.dumps({"error": {"code": "IICP-E021", "message": "invalid or missing relay session token"}}).encode()
+                    self._json_response(401, err, cors=True)
+                    return
+                length = int(self.headers.get("Content-Length", 0))
+                try:
+                    payload = json.loads(self.rfile.read(length)) if length else {}
+                except (ValueError, json.JSONDecodeError):
+                    self.send_error(400, "invalid JSON body")
+                    return
+                call_id = payload.get("call_id", "")
+                result = payload.get("result")
+                if not call_id or not isinstance(result, dict):
+                    err = json.dumps({"error": {"code": "IICP-E001", "message": "call_id and result are required"}}).encode()
+                    self._json_response(422, err, cors=True)
+                    return
+                # Future was created on the asyncio loop — resolve it there.
+                loop.call_soon_threadsafe(session.on_response, call_id, result)
+                self.send_response(204)
+                self._send_cors_headers()
+                self.end_headers()
+
+            def _relay_unbind(self) -> None:
+                session = self._relay_authed_session()
+                if session is None:
+                    err = json.dumps({"error": {"code": "IICP-E021", "message": "invalid or missing relay session token"}}).encode()
+                    self._json_response(401, err, cors=True)
+                    return
+                session.close()
+                node._relay_sessions.unbind(session.worker_id)
+                logger.info("HTTP-poll relay worker unbound: %s", session.worker_id)
+                self.send_response(204)
+                self._send_cors_headers()
+                self.end_headers()
+
+            # ── Path-scoped worker endpoints: /v1/relay-for/<wid>/… ───────
+            # Relay-bound workers register endpoint={relay}/v1/relay-for/<wid>
+            # with the directory, so PUBLISHED consumers — which compose
+            # "{endpoint}/v1/task" — route through the relay with no client
+            # changes. (Fixes the R1 defect where workers advertised the bare
+            # relay endpoint and the relay executed their tasks itself.)
+
+            def _relay_for_worker_id(self) -> str:
+                parts = self.path.split("/")
+                # ['', 'v1', 'relay-for', '<wid>', ...]
+                return parts[3] if len(parts) > 3 else ""
+
+            def _relay_for_task(self) -> None:
+                worker_id = self._relay_for_worker_id()
+                session = node._relay_sessions.get(worker_id)
+                if session is None or not session.is_alive():
+                    err = json.dumps(
+                        {"error": {"code": "IICP-E030", "message": "no alive relay session for this worker"}}
+                    ).encode()
+                    self._json_response(404, err, cors=True)
+                    return
+                length = int(self.headers.get("Content-Length", 0))
+                try:
+                    task = json.loads(self.rfile.read(length)) if length else {}
+                except (ValueError, json.JSONDecodeError):
+                    self.send_error(400, "invalid JSON body")
+                    return
+                try:
+                    result = asyncio.run_coroutine_threadsafe(
+                        session.forward_task(task, timeout=120.0), loop
+                    ).result(timeout=125)
+                    resp_body = json.dumps(
+                        {"task_id": task.get("task_id", ""), "status": "completed", **result}
+                    ).encode()
+                    self._json_response(200, resp_body, cors=True)
+                except Exception as exc:  # noqa: BLE001
+                    err = json.dumps(
+                        {"error": {"code": "IICP-E031", "message": f"relay session forward failed: {exc}"}}
+                    ).encode()
+                    self._json_response(502, err, cors=True)
+
+            def _relay_for_health(self) -> None:
+                worker_id = self._relay_for_worker_id()
+                session = node._relay_sessions.get(worker_id)
+                if session is None or not session.is_alive():
+                    err = json.dumps({"error": {"code": "IICP-E030", "message": "no alive relay session for this worker"}}).encode()
+                    self._json_response(404, err, cors=True)
+                    return
+                body = json.dumps(
+                    {
+                        "status": "ok",
+                        "node_id": worker_id,
+                        "via_relay": True,
+                        "models": getattr(session, "models", []),
+                    }
+                ).encode()
+                self._json_response(200, body, cors=True)
 
             # ── GET /iicp/health ──────────────────────────────────────────
 
@@ -1152,10 +1359,12 @@ class IicpNode:
 
             # ── helpers ───────────────────────────────────────────────────
 
-            def _json_response(self, status: int, body: bytes) -> None:
+            def _json_response(self, status: int, body: bytes, cors: bool = False) -> None:
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
+                if cors:
+                    self._send_cors_headers()
                 self.end_headers()
                 self.wfile.write(body)
 
@@ -1259,7 +1468,9 @@ class IicpNode:
             from iicp_client.relay_session import RelayAcceptServer
 
             relay_port = getattr(self._cfg, "relay_accept_port", 9485)
-            relay_accept_srv = RelayAcceptServer(self._relay_sessions, host=host, port=relay_port)
+            relay_accept_srv = RelayAcceptServer(
+                self._relay_sessions, host=host, port=relay_port, http_port=port
+            )
             try:
                 await relay_accept_srv.start()
                 bg_tasks.append(
@@ -1290,7 +1501,10 @@ class IicpNode:
                 transport_method='turn_relay' and endpoint=<relay_host>:<relay_port>.
                 This makes the node appear ACTIVE in directory + stats (#358).
                 """
-                new_endpoint = f"http://{rhost}:{rport}"
+                # Path-scoped endpoint (#450): consumers compose "{endpoint}/v1/task",
+                # so the scoped path makes the relay forward to THIS worker's bound
+                # session instead of executing the task on its own backend.
+                new_endpoint = f"http://{rhost}:{rport}/v1/relay-for/{worker_id}"
                 # Update config so register() uses the relay endpoint
                 _node_ref._cfg.endpoint = new_endpoint
                 _node_ref._cfg.transport_method = "turn_relay"

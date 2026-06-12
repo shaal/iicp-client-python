@@ -135,7 +135,8 @@ class RelayWorkerClient:
                 returns the result dict.
             models: Model names advertised in RELAY_BIND (optional).
             on_bind: Called after a successful RELAY_ACK with
-                (relay_host, relay_port, session_id). Useful to update
+                (relay_host, relay_http_port, worker_id) — the HTTP port is
+                taken from RELAY_ACK field 4 (fallback 9484). Useful to update
                 the directory registration with the relay endpoint.
         """
         self._worker_id = worker_id
@@ -206,6 +207,10 @@ class RelayWorkerClient:
             ack_body = _dec(frame[1]) if frame[1] else {}
             if ack_body.get(1) != "ok":
                 raise ConnectionError(f"RELAY_ACK not ok: {ack_body}")
+            # Field 4 (#450): the relay's HTTP task port — used for directory
+            # registration ({relay}:{http_port}/v1/relay-for/{worker_id}).
+            # Relays predating the field default to the standard task port.
+            relay_http_port = ack_body.get(4) if isinstance(ack_body.get(4), int) else 9484
 
             logger.info(
                 "Relay worker %s: bound to relay %s:%d",
@@ -213,7 +218,7 @@ class RelayWorkerClient:
             )
             if self._on_bind:
                 try:
-                    await self._on_bind(self._relay_host, self._relay_port, self._worker_id)
+                    await self._on_bind(self._relay_host, relay_http_port, self._worker_id)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("on_bind callback failed: %s", exc)
 
