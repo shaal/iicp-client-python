@@ -26,6 +26,7 @@ import asyncio
 import json
 import logging
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -235,6 +236,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "outbound to (e.g. relay.example.com:9485). When set, this node acts "
         "as a relay-worker — inbound tasks are forwarded through the relay for "
         "operators behind CGNAT. env: IICP_RELAY_WORKER_ENDPOINT",
+    )
+    serve.add_argument(
+        "--tunnel",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="#520 NAT-ladder rung 5: expose this node via a zero-account "
+        "Cloudflare Quick Tunnel (requires cloudflared on PATH; never "
+        "auto-installed). Default: automatic — used only when every other "
+        "NAT path fails (tier ≥ 3, no relay found). --tunnel forces it on; "
+        "--no-tunnel disables the automatic escalation. env: IICP_TUNNEL=1/0",
     )
     serve.add_argument(
         "--relay-capable",
@@ -966,6 +977,16 @@ async def _serve(args: argparse.Namespace) -> int:
     setup_node_log(node_id, _log_dir_override)
 
     relay_worker_ep: str | None = getattr(args, "relay_worker_endpoint", None)
+    # #520 rung 5 — tri-state: True (forced), False (disabled), None (auto:
+    # only when every other NAT path fails). CLI flag wins over IICP_TUNNEL.
+    _tunnel_pref: bool | None = getattr(args, "tunnel", None)
+    if _tunnel_pref is None:
+        _env_tunnel = (_env("IICP_TUNNEL") or "").lower()
+        if _env_tunnel in ("1", "true", "yes"):
+            _tunnel_pref = True
+        elif _env_tunnel in ("0", "false", "no"):
+            _tunnel_pref = False
+    _tunnel = None  # QuickTunnel handle — closed in the serve finally block
     _backend_flavor = _detect_backend_flavor(
         args.backend_url, getattr(args, "backend_api_key", "") or "", args.backend_type
     )
@@ -1054,14 +1075,21 @@ async def _serve(args: argparse.Namespace) -> int:
                         relay_port,
                     )
                 else:
-                    logger.warning(
-                        "NAT tier=%d: no relay-capable peers found in directory. "
-                        "Enabling mesh to discover relays via gossip. "
-                        "Set IICP_RELAY_WORKER_ENDPOINT=<host>:<port> to specify "
-                        "a relay manually.",
-                        profile.tier,
-                    )
-                    cfg.enable_mesh = True
+                    # #520 rung 5: no relay anywhere → Quick Tunnel (unless
+                    # the operator disabled it with --no-tunnel/IICP_TUNNEL=0).
+                    if _tunnel_pref is not False:
+                        _tunnel = _open_tunnel_rung(node, args.port, forced=False)
+                        if _tunnel is not None:
+                            public_endpoint = _tunnel.url
+                    if _tunnel is None:
+                        logger.warning(
+                            "NAT tier=%d: no relay-capable peers found in directory "
+                            "and no tunnel available. Enabling mesh to discover "
+                            "relays via gossip. Set IICP_RELAY_WORKER_ENDPOINT="
+                            "<host>:<port> to specify a relay manually.",
+                            profile.tier,
+                        )
+                        cfg.enable_mesh = True
         except Exception as exc:  # noqa: BLE001
             logger.warning("NAT detection failed: %s — continuing without it", exc)
     else:
@@ -1090,6 +1118,14 @@ async def _serve(args: argparse.Namespace) -> int:
                 node.apply_nat_profile(synth)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("IPv6 pinhole attempt failed: %s", exc)
+
+    # #520 — `--tunnel` forces rung 5 regardless of NAT tier (e.g. an operator
+    # who KNOWS they're unreachable, or wants an https endpoint for browser
+    # consumers without touching the router).
+    if _tunnel_pref is True and _tunnel is None:
+        _tunnel = _open_tunnel_rung(node, args.port, forced=True)
+        if _tunnel is not None:
+            public_endpoint = _tunnel.url
 
     # The handler expects base_url; the CLI's --backend-url is the OpenAI-
     # compatible root. Append /v1 if not already present (Ollama serves at
@@ -1223,8 +1259,72 @@ async def _serve(args: argparse.Namespace) -> int:
     finally:
         if proxy_task is not None:
             proxy_task.cancel()  # node exited → stop the co-hosted proxy
+        if _tunnel is not None:
+            _tunnel.close()  # #520 — tear the Quick Tunnel down with the node
         _instance_lock.release()  # #405 — free the pidfile on shutdown
     return 0
+
+
+def _open_tunnel_rung(node: IicpNode, local_port: int, *, forced: bool):
+    """#520 rung 5: open a Quick Tunnel and wire it into the node lifecycle.
+
+    Setup (binary detection), initiation (spawn + URL parse), supervision
+    (watchdog respawns + re-registers on URL rotation) and the install hint
+    all live here; teardown happens in the serve `finally` (+ atexit).
+    Returns the QuickTunnel handle, or None when unavailable/failed —
+    callers fall through to the next rung.
+
+    Must be called from async context (captures the running loop so the
+    watchdog thread can marshal `node.register()` back onto it).
+    """
+    from iicp_client.tunnel import INSTALL_HINT, cloudflared_path, open_quick_tunnel
+
+    if not cloudflared_path():
+        logger.warning(INSTALL_HINT)
+        return None
+    try:
+        tunnel = open_quick_tunnel(local_port)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Quick Tunnel failed to start: %s — continuing without it", exc)
+        return None
+
+    node._cfg.endpoint = tunnel.url  # noqa: SLF001 — same pattern as _on_relay_bind
+    node._cfg.transport_method = "external_tunnel"  # noqa: SLF001
+    loop = asyncio.get_running_loop()
+
+    def _on_new_url(url: str) -> None:
+        # Quick Tunnel URLs rotate per process — re-register with the new one.
+        node._cfg.endpoint = url  # noqa: SLF001
+        asyncio.run_coroutine_threadsafe(node.register(), loop)
+
+    def _on_dead() -> None:
+        logger.error(
+            "Quick Tunnel permanently down — this node is no longer publicly "
+            "reachable. Restart `iicp-node serve` to recover."
+        )
+
+    tunnel.watch(_on_new_url, _on_dead)
+
+    # Teardown must survive SIGTERM too: a plain `kill` bypasses finally/atexit
+    # in CPython, which would orphan the cloudflared child. Close the tunnel,
+    # then re-raise with the default handler so exit semantics stay unchanged.
+    def _terminate(signum: int, _frame: object) -> None:
+        tunnel.close()
+        signal.signal(signum, signal.SIG_DFL)
+        signal.raise_signal(signum)
+
+    try:
+        signal.signal(signal.SIGTERM, _terminate)
+    except ValueError:
+        pass  # not on the main thread — finally/atexit still cover normal exits
+
+    logger.info(
+        "NAT rung 5%s: public https endpoint via Quick Tunnel — %s "
+        "(zero-account; URL rotates on restart)",
+        " (forced)" if forced else "",
+        tunnel.url,
+    )
+    return tunnel
 
 
 async def _auto_elect_relay(directory_url: str, intent: str, node_id: str) -> tuple[str, int] | None:
