@@ -1222,10 +1222,12 @@ class IicpNode:
             # ── POST /v1/task ─────────────────────────────────────────────
 
             def _task(self) -> None:
-                # F4 (#524) — per-origin rate limit before any work.
-                if node._task_rate_limit > 0:
-                    key = self.headers.get("Origin") or self.client_address[0]
-                    if not node._task_rate_allow(key):
+                # F4 (#524) — rate-limit browser-origin task dispatch (the
+                # CORS confused-deputy vector) only. Non-browser callers send no
+                # Origin and are the operator's own authed traffic — never throttled.
+                _origin = self.headers.get("Origin")
+                if node._task_rate_limit > 0 and _origin:
+                    if not node._task_rate_allow(_origin):
                         self.send_response(429)
                         self.send_header("Content-Type", "application/json")
                         self.send_header("Access-Control-Allow-Origin", "*")
