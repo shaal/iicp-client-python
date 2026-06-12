@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 within the scope of the IICP Software axis (see [`VERSIONING.md`](https://github.com/RobLe3/iicp.network/blob/main/project/VERSIONING.md)
 in the main repo).
 
+## [0.7.58] — 2026-06-12
+
+### Security — relay session cap (red-team F5)
+
+- The relay caps concurrent worker sessions (default 256); new binds past the
+  cap are rejected (HTTP 503 `IICP-E039` / TCP `RELAY_ACK` error), closing a
+  bind-flood memory-exhaustion DoS. A rebind of an existing worker_id is exempt.
+
+### Added — `iicp-node update --check`
+
+- Read-only check for a newer published release (numeric version compare) with
+  the exact upgrade command. Exit 10 when a newer release exists, 0 otherwise.
+
 ## [0.7.57] — 2026-06-12
 
 ### Added — automatic Quick-Tunnel escalation (NAT ladder rung 5, #520)
