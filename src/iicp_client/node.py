@@ -573,6 +573,13 @@ class IicpNode:
         # node_id is optional — directory assigns one if absent. Send only when set.
         if self._cfg.node_id:
             payload["node_id"] = self._cfg.node_id
+        # Phase 2 (#529/#55) — prove ownership on re-registration so an endpoint
+        # change (rotating tunnel/CGNAT) is accepted via the IICP-E050 token path
+        # instead of relying on old-endpoint-absence. Sent only when we hold a
+        # prior token; additive + backwards-compatible (directory accepts-but-
+        # does-not-require).
+        if self._node_token:
+            payload["current_node_token"] = self._node_token
         # spec v0.7.0 — advertise native IICP binary endpoint if configured
         if self._cfg.transport_endpoint:
             payload["transport_endpoint"] = self._cfg.transport_endpoint

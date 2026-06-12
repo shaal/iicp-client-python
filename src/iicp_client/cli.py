@@ -1043,6 +1043,12 @@ async def _serve(args: argparse.Namespace) -> int:
         node_hmac_key=saved.node_hmac_key or "" if saved else "",
     )
     node = IicpNode(cfg)
+    # Phase 2 (#529/#55) — seed the previously-cached node_token so a
+    # re-registration (e.g. after a tunnel-URL rotation) can prove ownership of
+    # this node_id via `current_node_token` (IICP-E050 token path). Additive +
+    # backwards-compatible: the directory accepts-but-does-not-require it.
+    if saved is not None and getattr(saved, "node_token", None):
+        node._node_token = saved.node_token
 
     # Optional ADR-041 NAT detection. Runs detect_nat() to discover a public
     # endpoint via UPnP / external-IP probe and applies the result to the node
