@@ -1755,7 +1755,16 @@ def _cmd_mcp_gateway(args: argparse.Namespace) -> int:
 
     import httpx
 
-    _DANGEROUS = {"bash", "shell", "exec", "run_command", "eval"}
+    # Backstop denylist on top of the operator's explicit --tools allowlist
+    # (red-team pass 3): obvious shells, interpreters, and exec primitives an
+    # operator should never expose even by accident. Not the primary control
+    # (the required --tools allowlist + allow_tool_execution opt-in are) — a
+    # best-effort safety net.
+    _DANGEROUS = {
+        "bash", "sh", "zsh", "fish", "shell", "powershell", "pwsh", "cmd",
+        "exec", "execute", "run_command", "run", "system", "eval",
+        "python", "python3", "node", "ruby", "perl", "subprocess", "popen", "spawn",
+    }
 
     def _tool_to_intent(name: str) -> str:
         safe = re.sub(r"[^a-z0-9_]", "_", name.lower())
