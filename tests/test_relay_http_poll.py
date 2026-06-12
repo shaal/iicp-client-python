@@ -318,3 +318,31 @@ class TestRelayAckHttpPort:
         ack_body: dict = {1: "ok", 2: "w-1"}
         relay_http_port = ack_body.get(4) if isinstance(ack_body.get(4), int) else 9484
         assert relay_http_port == 9484
+
+
+# ── Node-wide CORS (browser consumers, 2026-06-12) ───────────────────────────
+
+
+class TestNodeWideCors:
+    """Browser pages dispatch /v1/task to https nodes directly — every node
+    endpoint must answer preflights and carry CORS headers (fails if the
+    node-wide CORS change is reverted)."""
+
+    def test_options_preflight_on_task(self, relay):
+        status, _, headers = relay.request("OPTIONS", "/v1/task")
+        assert status == 204
+        assert headers.get("Access-Control-Allow-Origin") == "*"
+
+    def test_health_carries_cors(self, relay):
+        status, _, headers = relay.request("GET", "/iicp/health")
+        assert status == 200
+        assert headers.get("Access-Control-Allow-Origin") == "*"
+
+    def test_task_response_carries_cors(self, relay):
+        status, _, headers = relay.request(
+            "POST",
+            "/v1/task",
+            {"task_id": "t-cors", "intent": "urn:iicp:intent:llm:chat:v1",
+             "payload": {"messages": [{"role": "user", "content": "hi"}]}},
+        )
+        assert headers.get("Access-Control-Allow-Origin") == "*"

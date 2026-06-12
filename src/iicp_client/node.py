@@ -860,18 +860,15 @@ class IicpNode:
                     self.send_error(404)
 
             def do_OPTIONS(self) -> None:  # noqa: N802
-                # CORS preflight for browser relay workers (#450/#452): the
-                # /v1/relay/* worker transport and /v1/relay-for/* consumer
-                # paths are fetch()-able from web pages.
-                if node._cfg.relay_capable and (
-                    self.path.startswith("/v1/relay/") or self.path.startswith("/v1/relay-for/")
-                ):
-                    self.send_response(204)
-                    self._send_cors_headers()
-                    self.send_header("Access-Control-Max-Age", "86400")
-                    self.end_headers()
-                else:
-                    self.send_error(404)
+                # CORS preflight for ALL node endpoints (#450/#452 + browser
+                # consumers). The HTTP API is openly callable by design — CORS
+                # only gates BROWSERS (curl was never restricted), and web
+                # pages (e.g. iicp.network/browser-node) are first-class
+                # consumers that dispatch /v1/task to https nodes directly.
+                self.send_response(204)
+                self._send_cors_headers()
+                self.send_header("Access-Control-Max-Age", "86400")
+                self.end_headers()
 
             def _send_cors_headers(self) -> None:
                 self.send_header("Access-Control-Allow-Origin", "*")
@@ -1359,7 +1356,11 @@ class IicpNode:
 
             # ── helpers ───────────────────────────────────────────────────
 
-            def _json_response(self, status: int, body: bytes, cors: bool = False) -> None:
+            def _json_response(self, status: int, body: bytes, cors: bool = True) -> None:
+                # cors defaults True: every JSON response carries CORS headers
+                # so browser consumers can read /v1/task + /iicp/health replies
+                # from https nodes (maintainer 2026-06-12 — the web client is
+                # an IICP consumer; CORS only ever gated browsers, not curl).
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
