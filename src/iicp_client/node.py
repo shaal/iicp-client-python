@@ -425,6 +425,17 @@ class IicpNode:
         from iicp_client.relay_session import RelaySessionRegistry
 
         self._relay_sessions = RelaySessionRegistry()
+        # F4 (#524) — per-origin /v1/task rate limit. Because nodes answer CORS
+        # for any origin, a malicious page could script a visitor's browser into
+        # a high-volume task proxy. Fixed-window counter keyed by Origin header
+        # (or client IP for non-browser callers). Default 120/60s; override via
+        # IICP_TASK_RATE_LIMIT (0 disables). Caps abuse without closing the mesh.
+        import os as _os
+
+        self._task_rate_limit = int(_os.environ.get("IICP_TASK_RATE_LIMIT", "120"))
+        self._task_rate_window_s = 60.0
+        self._task_rate_buckets: dict[str, tuple[float, int]] = {}
+        self._task_rate_lock = threading.Lock()
         # ADR-019: HMAC key for signing pricing declarations. Initialized from
         # NodeConfig.node_hmac_key; overwritten from the directory's response
         # on register() so subsequent re-registrations (after expiry) sign
@@ -507,6 +518,26 @@ class IicpNode:
                 "tier": tier,
                 "detection_log_tail": log[-1:] if log else [],
             }
+
+    def _task_rate_allow(self, key: str) -> bool:
+        """F4 (#524) fixed-window per-origin admission for /v1/task. Returns
+        True if this caller is under the limit for the current window."""
+        import time as _time
+
+        now = _time.monotonic()
+        with self._task_rate_lock:
+            window_start, count = self._task_rate_buckets.get(key, (now, 0))
+            if now - window_start >= self._task_rate_window_s:
+                window_start, count = now, 0
+            count += 1
+            self._task_rate_buckets[key] = (window_start, count)
+            # Opportunistic prune so the map can't grow unbounded under churn.
+            if len(self._task_rate_buckets) > 4096:
+                cutoff = now - self._task_rate_window_s
+                self._task_rate_buckets = {
+                    k: v for k, v in self._task_rate_buckets.items() if v[0] >= cutoff
+                }
+            return count <= self._task_rate_limit
 
     # ── Directory operations ──────────────────────────────────────────────
 
@@ -1191,6 +1222,21 @@ class IicpNode:
             # ── POST /v1/task ─────────────────────────────────────────────
 
             def _task(self) -> None:
+                # F4 (#524) — per-origin rate limit before any work.
+                if node._task_rate_limit > 0:
+                    key = self.headers.get("Origin") or self.client_address[0]
+                    if not node._task_rate_allow(key):
+                        self.send_response(429)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Access-Control-Allow-Origin", "*")
+                        self.send_header("Retry-After", str(int(node._task_rate_window_s)))
+                        self.end_headers()
+                        self.wfile.write(
+                            json.dumps(
+                                {"error": {"code": "IICP-E023", "message": "per-origin task rate limit exceeded"}}
+                            ).encode()
+                        )
+                        return
                 # Read the body first so QoS-aware admission can see
                 # constraints.qos_class before deciding whether to wait for a slot.
                 try:
