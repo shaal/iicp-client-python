@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 within the scope of the IICP Software axis (see [`VERSIONING.md`](https://github.com/RobLe3/iicp.network/blob/main/project/VERSIONING.md)
 in the main repo).
 
+## [0.7.57] — 2026-06-12
+
+### Added — automatic Quick-Tunnel escalation (NAT ladder rung 5, #520)
+
+- When every NAT path fails (no direct endpoint, no UPnP pinhole, no IPv6
+  GUA, no relay-capable peer in the directory), the node now exposes itself
+  via a zero-account Cloudflare Quick Tunnel automatically: detect
+  `cloudflared` on PATH (never auto-installed — one actionable install hint
+  when missing), spawn it, register the issued `https://*.trycloudflare.com`
+  URL as the endpoint (`transport_method=external_tunnel`), supervise the
+  child (bounded respawn ×3), and tear it down with the node on every exit
+  path.
+- `--tunnel` forces the rung regardless of NAT tier (e.g. to get an https
+  endpoint for browser consumers without touching the router);
+  `--no-tunnel` / `IICP_TUNNEL=0` disables the automatic escalation.
+
 ## [0.7.56] — 2026-06-12
 
 (Also includes the never-published 0.7.55 changes: MCP gateway as a built-in
