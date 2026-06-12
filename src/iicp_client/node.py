@@ -972,7 +972,12 @@ class IicpNode:
                 existing = node._relay_sessions.get(worker_id)
                 if existing is not None and existing.is_alive():
                     err = json.dumps(
-                        {"error": {"code": "IICP-E038", "message": "worker_id has an alive relay session — rebind rejected"}}
+                        {
+                            "error": {
+                                "code": "IICP-E038",
+                                "message": "worker_id has an alive relay session — rebind rejected",
+                            }
+                        }
                     ).encode()
                     self._json_response(409, err, cors=True)
                     return
@@ -998,7 +1003,9 @@ class IicpNode:
             def _relay_pull(self) -> None:
                 session = self._relay_authed_session()
                 if session is None:
-                    err = json.dumps({"error": {"code": "IICP-E021", "message": "invalid or missing relay session token"}}).encode()
+                    err = json.dumps(
+                        {"error": {"code": "IICP-E021", "message": "invalid or missing relay session token"}}
+                    ).encode()
                     self._json_response(401, err, cors=True)
                     return
                 try:
@@ -1019,7 +1026,9 @@ class IicpNode:
             def _relay_result(self) -> None:
                 session = self._relay_authed_session()
                 if session is None:
-                    err = json.dumps({"error": {"code": "IICP-E021", "message": "invalid or missing relay session token"}}).encode()
+                    err = json.dumps(
+                        {"error": {"code": "IICP-E021", "message": "invalid or missing relay session token"}}
+                    ).encode()
                     self._json_response(401, err, cors=True)
                     return
                 length = int(self.headers.get("Content-Length", 0))
@@ -1031,7 +1040,9 @@ class IicpNode:
                 call_id = payload.get("call_id", "")
                 result = payload.get("result")
                 if not call_id or not isinstance(result, dict):
-                    err = json.dumps({"error": {"code": "IICP-E001", "message": "call_id and result are required"}}).encode()
+                    err = json.dumps(
+                        {"error": {"code": "IICP-E001", "message": "call_id and result are required"}}
+                    ).encode()
                     self._json_response(422, err, cors=True)
                     return
                 # Future was created on the asyncio loop — resolve it there.
@@ -1043,7 +1054,9 @@ class IicpNode:
             def _relay_unbind(self) -> None:
                 session = self._relay_authed_session()
                 if session is None:
-                    err = json.dumps({"error": {"code": "IICP-E021", "message": "invalid or missing relay session token"}}).encode()
+                    err = json.dumps(
+                        {"error": {"code": "IICP-E021", "message": "invalid or missing relay session token"}}
+                    ).encode()
                     self._json_response(401, err, cors=True)
                     return
                 session.close()
@@ -1098,7 +1111,9 @@ class IicpNode:
                 worker_id = self._relay_for_worker_id()
                 session = node._relay_sessions.get(worker_id)
                 if session is None or not session.is_alive():
-                    err = json.dumps({"error": {"code": "IICP-E030", "message": "no alive relay session for this worker"}}).encode()
+                    err = json.dumps(
+                        {"error": {"code": "IICP-E030", "message": "no alive relay session for this worker"}}
+                    ).encode()
                     self._json_response(404, err, cors=True)
                     return
                 body = json.dumps(

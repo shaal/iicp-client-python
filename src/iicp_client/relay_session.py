@@ -177,7 +177,7 @@ class HttpPollWorkerSession:
         self._last_pull = time.monotonic()
         try:
             return await asyncio.wait_for(self._queue.get(), timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return None
         finally:
             self._last_pull = time.monotonic()
