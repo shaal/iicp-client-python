@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 within the scope of the IICP Software axis (see [`VERSIONING.md`](https://github.com/RobLe3/iicp.network/blob/main/project/VERSIONING.md)
 in the main repo).
 
+## [0.7.56] — 2026-06-12
+
+(Also includes the never-published 0.7.55 changes: MCP gateway as a built-in
+`iicp-node mcp-gateway` feature.)
+
+### Added — HTTP long-poll relay worker transport (#450)
+
+- Relay-capable nodes accept browser-compatible workers over plain HTTP:
+  `POST /v1/relay/bind` (bearer session token; 409 on alive-rebind, #510
+  interim-C), `GET /v1/relay/pull` (long-poll ≤25 s), `POST /v1/relay/result`,
+  `POST /v1/relay/unbind` — same session registry as TCP RELAY_BIND workers.
+- Path-scoped worker endpoints `{relay}/v1/relay-for/<worker_id>/v1/task` +
+  `/iicp/health`: published consumers route through the relay with no client
+  changes. RELAY_ACK gains additive field 4 (the relay's HTTP task port).
+
+### Fixed — relay-bound workers were silently misattributed
+
+- Relay workers previously advertised the bare relay endpoint, so consumer
+  dispatches executed **on the relay itself** instead of forwarding (and used
+  the non-HTTP accept port). Workers now register the path-scoped endpoint.
+
+### Changed — CORS on every node HTTP endpoint
+
+- All node responses carry `Access-Control-Allow-Origin: *` and every path
+  answers `OPTIONS` preflights. Web pages (e.g. iicp.network/browser-node)
+  are first-class consumers: an https-exposed node now serves browser
+  dispatches directly. No new capability — CORS only ever gated browsers;
+  curl was never restricted.
+
 ## [0.7.54] — 2026-06-11
 
 ### Fixed — `iicp-node credits` resilience
