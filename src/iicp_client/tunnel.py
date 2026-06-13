@@ -30,6 +30,7 @@ import shutil
 import subprocess
 import threading
 import time
+import urllib.request
 from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
@@ -38,9 +39,30 @@ _URL_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
 
 # cloudflared usually prints the URL within ~5 s; 20 s covers slow first runs.
 TUNNEL_START_TIMEOUT = 20.0
-# Bounded self-healing: after this many unexpected deaths, stop respawning
-# and surface the failure (operator restart required).
+# Bounded self-healing: this many CONSECUTIVE failed respawns (without the tunnel
+# recovering to a healthy state in between) → give up. Resets to 0 once a respawned
+# tunnel passes a health check, so a long-running relay heals indefinitely. (#538)
 MAX_RESPAWNS = 3
+# Active liveness check of the tunnel's OWN public URL — catches the failure mode the
+# process-exit watcher misses: cloudflared still running but the edge connection
+# dropped, so the URL is unreachable while the node looks healthy (the recurring
+# dead-endpoint bug, #538). Probe every interval; after this many consecutive
+# failures, force a tunnel restart (terminate → respawn → new URL → re-register).
+TUNNEL_HEALTH_INTERVAL_S = 30.0
+TUNNEL_HEALTH_MAX_FAILS = 3
+
+
+def _tunnel_url_reachable(url: str) -> bool:
+    """GET ``<url>/iicp/health`` through the Cloudflare edge back to the local node —
+    the same path a browser consumer takes — so it detects an edge-drop, not just a
+    local-process death. Any error / non-2xx → unreachable (treated as a failed probe).
+    """
+    probe = url.rstrip("/") + "/iicp/health"
+    try:
+        with urllib.request.urlopen(probe, timeout=8) as resp:  # noqa: S310
+            return 200 <= resp.status < 300
+    except Exception:  # noqa: BLE001 — any failure means the URL isn't reachable
+        return False
 
 INSTALL_HINT = (
     "cloudflared not found — install it to become reachable without router "
@@ -79,21 +101,54 @@ class QuickTunnel:
         """
 
         def _run() -> None:
+            health_fails = 0
+            last_health = time.monotonic()
             while not self._closed:
-                self.process.wait()
+                # Wait until the process exits OR the tunnel URL goes unreachable
+                # (edge-drop) for too long. Poll instead of process.wait() so the
+                # health check can run in between.
+                while not self._closed:
+                    if self.process.poll() is not None:
+                        break  # process exited — crash or our health-triggered terminate
+                    now = time.monotonic()
+                    # #538 — edge-drop detection: cloudflared can stay alive while its
+                    # tunnel becomes unreachable. Probe the public URL; restart on a
+                    # sustained failure so the dead endpoint can't persist.
+                    if now - last_health >= TUNNEL_HEALTH_INTERVAL_S:
+                        last_health = now
+                        if _tunnel_url_reachable(self.url):
+                            health_fails = 0
+                            # Recovered/steady → forget prior respawns so a relay's
+                            # lifetime edge-drops never exhaust MAX_RESPAWNS.
+                            self._respawns = 0
+                        else:
+                            health_fails += 1
+                            if health_fails >= TUNNEL_HEALTH_MAX_FAILS:
+                                logger.warning(
+                                    "Quick Tunnel %s unreachable %d× while cloudflared is "
+                                    "up (edge dropped) — restarting tunnel.",
+                                    self.url,
+                                    health_fails,
+                                )
+                                if self.process.poll() is None:
+                                    self.process.terminate()
+                                health_fails = 0
+                                # poll() sees the exit on the next loop → respawn below.
+                    time.sleep(0.2)
                 if self._closed:
                     return
                 self._respawns += 1
                 if self._respawns > MAX_RESPAWNS:
                     logger.error(
-                        "Quick Tunnel died %d times — giving up. Node is no longer "
-                        "publicly reachable; restart `iicp-node serve` to recover.",
+                        "Quick Tunnel: %d consecutive respawns failed to recover a healthy "
+                        "tunnel — giving up. Node is no longer publicly reachable; restart "
+                        "`iicp-node serve` to recover.",
                         self._respawns - 1,
                     )
                     on_dead()
                     return
                 logger.warning(
-                    "Quick Tunnel exited unexpectedly — respawning (%d/%d)…",
+                    "Quick Tunnel down — respawning (%d/%d)…",
                     self._respawns,
                     MAX_RESPAWNS,
                 )
@@ -105,6 +160,8 @@ class QuickTunnel:
                     return
                 self.process = fresh.process
                 self.url = fresh.url
+                health_fails = 0
+                last_health = time.monotonic()
                 logger.info("Quick Tunnel back up at %s — re-registering.", self.url)
                 on_new_url(self.url)
 

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 within the scope of the IICP Software axis (see [`VERSIONING.md`](https://github.com/RobLe3/iicp.network/blob/main/project/VERSIONING.md)
 in the main repo).
 
+## [0.7.61] — 2026-06-13
+
+### Fixed — self-healing tunnel (resilience, #538)
+- The `--tunnel` watchdog now actively health-checks the tunnel's OWN public URL (GET
+  `/iicp/health` through the Cloudflare edge) every 30s, not just watch for the cloudflared
+  process to exit. A Quick Tunnel can keep its process alive while its edge connection drops,
+  leaving a dead public endpoint the directory still serves. After 3 consecutive unreachable
+  probes the watchdog restarts cloudflared → new URL → re-register; the respawn cap resets when
+  a fresh tunnel passes health, so a long-running relay self-heals indefinitely. Parity with Rust/TS.
+
 ## [0.7.60] — 2026-06-13
 
 ### Added — background self-updater (#521 P2)
