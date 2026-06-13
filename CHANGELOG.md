@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 within the scope of the IICP Software axis (see [`VERSIONING.md`](https://github.com/RobLe3/iicp.network/blob/main/project/VERSIONING.md)
 in the main repo).
 
+## [0.7.60] — 2026-06-13
+
+### Added — background self-updater (#521 P2)
+- A node running `serve` now keeps itself current automatically: it periodically checks the
+  registry and, when a newer release is published, `pip install --upgrade`s and re-execs onto
+  the new version — no operator intervention. **Once a node reaches 0.7.60, every future release
+  self-propagates.** Default-on; opt out with `IICP_AUTO_UPDATE=0`. Check cadence via
+  `IICP_AUTO_UPDATE_INTERVAL_S` (default 6h, min 5m). Loop-safe (post-upgrade the running
+  version equals latest) and failure-isolated (a failed upgrade never restarts or crashes the node).
+
+### Security
+- Expand the `mcp-gateway` dangerous-tool denylist backstop (red-team pass 3) — broaden the
+  set of shell/exec/interpreter tool names refused by default when exposing an MCP server as a
+  mesh node, reducing the chance a permissive MCP server leaks an arbitrary-execution tool.
+
 ## [0.7.59] — 2026-06-12
 
 ### Security

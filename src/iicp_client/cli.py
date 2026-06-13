@@ -1913,6 +1913,37 @@ def _cmd_mcp_gateway(args: argparse.Namespace) -> int:
     hb_thread = threading.Thread(target=_heartbeat_loop, daemon=True)
     hb_thread.start()
 
+    # #521 P2 — background self-updater: keep this node current without operator
+    # intervention. Default-on; opt out with IICP_AUTO_UPDATE=0. Loop-safe (after an
+    # upgrade the running version == latest). Never lets an error crash the node.
+    def _auto_update_loop():
+        from iicp_client import __version__ as _ver
+        from iicp_client.updater import (
+            auto_update_enabled,
+            auto_update_interval_s,
+            auto_update_tick,
+            latest_pypi_version,
+            perform_self_update,
+            reexec_cli,
+        )
+        if not auto_update_enabled():
+            return
+        interval = auto_update_interval_s()
+        while not stop_event.wait(interval):
+            try:
+                auto_update_tick(
+                    _ver,
+                    latest_pypi_version(),
+                    True,
+                    perform_self_update,
+                    reexec_cli,
+                    lambda m: sys.stdout.write(f"  [iicp-node] {m}\n") or sys.stdout.flush(),
+                )
+            except Exception:  # noqa: BLE001 — the updater must never take the node down
+                pass
+
+    threading.Thread(target=_auto_update_loop, daemon=True).start()
+
     bind_host = "::" if host in ("", "::") else host
     server = ThreadingHTTPServer((bind_host, port), _Handler)
     sys.stdout.write(f"  Listening on {bind_host}:{port}\n")

@@ -11,6 +11,9 @@ gap visible at a glance.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import urllib.request
 
 PYPI_URL = "https://pypi.org/pypi/iicp-client/json"
@@ -62,3 +65,74 @@ def check_update(current: str, latest: str | None) -> dict:
         "outdated": outdated,
         "command": "pip install -U iicp-client",
     }
+
+
+# ── P2 — background self-updater (#521) ─────────────────────────────────────────
+# A node running `serve` periodically checks the registry and, when a newer
+# release is published, upgrades itself and re-execs so it comes back on the new
+# version. This removes the dependency on operators manually upgrading downlevel
+# clients — once a node reaches the first release that contains this updater, all
+# future releases self-propagate. Default-on; opt out with IICP_AUTO_UPDATE=0.
+# Loop-safe by construction: after a successful upgrade the running version equals
+# `latest`, so the next tick is a no-op.
+
+
+def perform_self_update(spec: str = "iicp-client", timeout: float = 600.0) -> bool:
+    """`pip install --upgrade` the package in a subprocess. True on success."""
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--upgrade", "--quiet", spec],
+            check=True,
+            timeout=timeout,
+        )
+        return True
+    except Exception:  # noqa: BLE001 — any failure → "did not upgrade", retry next tick
+        return False
+
+
+def reexec_cli() -> None:
+    """Re-exec the current command so the just-upgraded package is loaded. Replaces
+    the process image (all threads); returns only if exec failed."""
+    try:
+        os.execvp(sys.argv[0], sys.argv)  # noqa: S606 — re-running our own argv
+    except Exception:  # noqa: BLE001 — fall back to the module entrypoint
+        os.execv(sys.executable, [sys.executable, "-m", "iicp_client.cli", *sys.argv[1:]])
+
+
+def auto_update_enabled() -> bool:
+    """Default-on; IICP_AUTO_UPDATE=0 (or false/no) opts out."""
+    return os.environ.get("IICP_AUTO_UPDATE", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def auto_update_interval_s(default: int = 21600) -> int:
+    """Check cadence in seconds (default 6h), floored at 5 min."""
+    try:
+        return max(300, int(os.environ.get("IICP_AUTO_UPDATE_INTERVAL_S", str(default))))
+    except ValueError:
+        return default
+
+
+def auto_update_tick(
+    current: str,
+    latest: str | None,
+    enabled: bool,
+    upgrade_fn,
+    reexec_fn,
+    log_fn,
+) -> str:
+    """One evaluation of the auto-update rule. Pure orchestration — all I/O is
+    injected so the decision is unit-testable. Returns the action taken:
+    'disabled' | 'unknown' | 'current' | 'upgraded' | 'upgrade-failed'."""
+    if not enabled:
+        return "disabled"
+    if latest is None:
+        return "unknown"
+    if not is_outdated(current, latest):
+        return "current"
+    log_fn(f"auto-update: newer release {latest} available (running {current}) — upgrading…")
+    if upgrade_fn():
+        log_fn(f"auto-update: upgraded to {latest}; restarting to apply…")
+        reexec_fn()  # normally does not return (process replaced)
+        return "upgraded"
+    log_fn("auto-update: upgrade failed; staying on current version, will retry next check")
+    return "upgrade-failed"

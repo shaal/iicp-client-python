@@ -67,3 +67,55 @@ class TestUpdateCli:
         code = main(["update", "--check"])
         assert code == 0
         assert "could not reach PyPI" in capsys.readouterr().out
+
+
+# ── P2 auto-updater (#521) ──────────────────────────────────────────────────────
+from iicp_client.updater import auto_update_tick
+
+
+def _spy():
+    calls = []
+    return calls, (lambda *a: calls.append(a))
+
+
+def test_auto_update_tick_upgrades_and_reexecs_when_newer():
+    logs, log_fn = _spy()
+    reexec_calls = []
+    result = auto_update_tick(
+        "0.7.59", "0.7.60", True,
+        upgrade_fn=lambda: True,
+        reexec_fn=lambda: reexec_calls.append(1),
+        log_fn=log_fn,
+    )
+    assert result == "upgraded"
+    assert reexec_calls == [1]  # re-exec attempted exactly once
+
+
+def test_auto_update_tick_noop_when_current():
+    result = auto_update_tick(
+        "0.7.60", "0.7.60", True,
+        upgrade_fn=lambda: (_ for _ in ()).throw(AssertionError("must not upgrade")),
+        reexec_fn=lambda: (_ for _ in ()).throw(AssertionError("must not reexec")),
+        log_fn=lambda *a: None,
+    )
+    assert result == "current"
+
+
+def test_auto_update_tick_disabled_is_noop():
+    assert auto_update_tick("0.7.59", "0.7.60", False, lambda: True, lambda: None, lambda *a: None) == "disabled"
+
+
+def test_auto_update_tick_unknown_latest_is_noop():
+    assert auto_update_tick("0.7.59", None, True, lambda: True, lambda: None, lambda *a: None) == "unknown"
+
+
+def test_auto_update_tick_failed_upgrade_does_not_reexec():
+    reexec_calls = []
+    result = auto_update_tick(
+        "0.7.59", "0.7.60", True,
+        upgrade_fn=lambda: False,
+        reexec_fn=lambda: reexec_calls.append(1),
+        log_fn=lambda *a: None,
+    )
+    assert result == "upgrade-failed"
+    assert reexec_calls == []  # no restart on a failed upgrade
