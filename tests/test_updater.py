@@ -8,6 +8,7 @@ import pytest
 
 from iicp_client import updater
 from iicp_client.cli import _build_parser, main
+from iicp_client.updater import auto_update_tick
 
 
 class TestVersionCompare:
@@ -70,7 +71,6 @@ class TestUpdateCli:
 
 
 # ── P2 auto-updater (#521) ──────────────────────────────────────────────────────
-from iicp_client.updater import auto_update_tick
 
 
 def _spy():
